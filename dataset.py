@@ -35,6 +35,8 @@ class ImageFolderDataset(Dataset):
         transform: Callable = None,
         is_train: bool = True,
         train_split: float = 0.8,
+        random_state: int = 42,
+        use_full_dataset: bool = False,
     ):
         """
         Args:
@@ -42,28 +44,36 @@ class ImageFolderDataset(Dataset):
             transform (callable, optional): Optional transform to be applied on a sample.
             is_train (bool): If true, loads training data, otherwise test data.
             train_split (float): Fraction of data to use for training (0.0-1.0).
+            random_state (int): Random seed for reproducible splits.
+            use_full_dataset (bool): If true, use full dataset for cross-validation.
         """
         self.root_dir = root_dir
         self.transform = transform
         self.is_train = is_train
         self.train_split = train_split
+        self.random_state = random_state
+        self.use_full_dataset = use_full_dataset
         
         # Load ImageFolder dataset
         self.full_dataset = ImageFolder(root_dir, transform=None)
         
-        # Create train/val split
-        total_size = len(self.full_dataset)
-        train_size = int(total_size * train_split)
-        val_size = total_size - train_size
-        
-        # Generate indices
-        indices = list(range(total_size))
-        np.random.shuffle(indices)
-        
-        if is_train:
-            self.indices = indices[:train_size]
+        # For cross-validation, we want the full dataset
+        if use_full_dataset:
+            self.indices = list(range(len(self.full_dataset)))
         else:
-            self.indices = indices[train_size:]
+            # Create train/val split for single split training
+            total_size = len(self.full_dataset)
+            train_size = int(total_size * train_split)
+            
+            # Generate reproducible indices
+            rng = np.random.RandomState(random_state)
+            indices = list(range(total_size))
+            rng.shuffle(indices)
+            
+            if is_train:
+                self.indices = indices[:train_size]
+            else:
+                self.indices = indices[train_size:]
         
         # Extract samples and labels for this split
         self.samples = [self.full_dataset.samples[i] for i in self.indices]
@@ -194,8 +204,11 @@ def create_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
     classes = np.unique(labels)
     class_weights = compute_class_weight('balanced', classes=classes, y=labels)
     
+    # Create class weight mapping for all possible classes
+    class_weight_map = {cls: weight for cls, weight in zip(classes, class_weights)}
+    
     # Map each sample to its class weight
-    sample_weights = np.array([class_weights[label] for label in labels])
+    sample_weights = np.array([class_weight_map[label] for label in labels])
     
     # Create sampler - convert to list for compatibility
     sampler = WeightedRandomSampler(
@@ -207,22 +220,49 @@ def create_weighted_sampler(labels: np.ndarray) -> WeightedRandomSampler:
     return sampler
 
 
+def extract_subject_id(filename: str) -> str:
+    """
+    Extract subject ID from filename with flexible patterns.
+    Works for both RAF-DB and ImageFolder naming conventions.
+    """
+    # Remove extension
+    name = os.path.splitext(filename)[0]
+    
+    # Try different patterns
+    patterns = [
+        # Subject-based patterns: subject001_img01 (no underscore after subject)
+        lambda x: ''.join([c for c in x.split('subject')[1].split('_')[0] if c.isdigit()]) if 'subject' in x and len(x.split('subject')) > 1 and not x.split('subject')[1].startswith('_') else None,
+        # Subject-based patterns: subject_002_01 (with underscore after subject)
+        lambda x: x.split('subject')[1].split('_')[1] if 'subject' in x and len(x.split('subject')) > 1 and x.split('subject')[1].startswith('_') and len(x.split('subject')[1].split('_')) > 1 else None,
+        # RAF-DB patterns: train_0001_aligned, test_0001_aligned
+        lambda x: x.split('_')[1] if x.startswith(('train_', 'test_')) and len(x.split('_')) >= 2 else None,
+        # Number-based patterns: 001_image_01
+        lambda x: x.split('_')[0] if x.split('_')[0].isdigit() else None,
+        # Fallback: first 6 chars as subject ID
+        lambda x: x[:6] if len(x) >= 6 else x
+    ]
+    
+    for pattern in patterns:
+        try:
+            subject_id = pattern(name)
+            if subject_id:
+                return subject_id
+        except:
+            continue
+    
+    return name  # Final fallback
+
+
 def create_group_kfold_splits(dataset, n_splits: int = 5, random_state: int = 42):
     """
     Create GroupKFold splits for cross-validation.
     Groups are created based on subject IDs extracted from filenames.
     """
-    # Extract subject IDs from filenames (assuming format: train_testsubject_XXX.jpg)
+    # Extract subject IDs from filenames with flexible patterns
     subject_ids = []
     for idx in range(len(dataset)):
         filename = dataset.image_files.iloc[idx, 0]
-        # Extract subject ID - look for patterns like "train_0001" -> subject "0001"
-        parts = filename.split('_')
-        if len(parts) >= 2:
-            subject_id = parts[1]  # Second part should be subject ID
-        else:
-            subject_id = filename  # Fallback to filename
-        
+        subject_id = extract_subject_id(filename)
         subject_ids.append(subject_id)
     
     subject_ids = np.array(subject_ids)
@@ -257,26 +297,51 @@ def create_imagefolder_loaders(
     """
     Create balanced data loaders for ImageFolder datasets with cross-validation support.
     """
-    # Create full dataset
+    # Create full dataset for cross-validation (use all data)
     train_transform = get_default_transform(image_size=image_size, is_train=True)
     test_transform = get_default_transform(image_size=image_size, is_train=False)
     
-    full_train_dataset = ImageFolderDataset(root_dir, transform=train_transform, is_train=True, train_split=train_split)
-    full_test_dataset = ImageFolderDataset(root_dir, transform=test_transform, is_train=False, train_split=train_split)
+    # Use full dataset for cross-validation splits
+    full_dataset = ImageFolderDataset(
+        root_dir, 
+        transform=get_default_transform(image_size=image_size, is_train=False),
+        use_full_dataset=True,
+        random_state=random_state
+    )
     
     # Get class weights for loss function
-    train_labels = np.array(full_train_dataset.image_files['label'])
-    class_weights = get_class_weights(train_labels)
+    all_labels = np.array(full_dataset.image_files['label'])
+    class_weights = get_class_weights(all_labels)
     
     # Create cross-validation splits
-    cv_splits = create_group_kfold_splits(full_train_dataset, n_splits=n_splits, random_state=random_state)
+    cv_splits = create_group_kfold_splits(full_dataset, n_splits=n_splits, random_state=random_state)
     
     loaders = []
     for split in cv_splits:
         train_indices = split['train_indices']
         val_indices = split['val_indices']
         
-        train_labels_subset = train_labels[train_indices]
+        # Create subset datasets with proper transforms
+        train_dataset = ImageFolderDataset(
+            root_dir, 
+            transform=train_transform,
+            use_full_dataset=True,
+            random_state=random_state
+        )
+        val_dataset = ImageFolderDataset(
+            root_dir, 
+            transform=test_transform,
+            use_full_dataset=True,
+            random_state=random_state
+        )
+        
+        # Create proper subsets using indices
+        from torch.utils.data import Subset
+        train_subset = Subset(train_dataset, train_indices)
+        val_subset = Subset(val_dataset, val_indices)
+        
+        # Get labels for this split
+        train_labels_subset = all_labels[train_indices]
         
         if use_weighted_sampler:
             train_sampler = create_weighted_sampler(train_labels_subset)
@@ -286,7 +351,7 @@ def create_imagefolder_loaders(
             train_shuffle = True
         
         train_loader = DataLoader(
-            full_train_dataset,
+            train_subset,
             batch_size=batch_size,
             shuffle=train_shuffle,
             sampler=train_sampler,
@@ -295,7 +360,7 @@ def create_imagefolder_loaders(
         )
         
         val_loader = DataLoader(
-            full_test_dataset,
+            val_subset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,
@@ -325,14 +390,16 @@ def create_balanced_loaders(
     random_state: int = 42
 ):
     """
-    Create balanced data loaders with cross-validation support.
+    Create balanced data loaders with cross-validation support for RAF-DB.
     """
-    # Create full dataset
+    # Create full dataset for cross-validation
     train_transform = get_default_transform(image_size=image_size, is_train=True)
     test_transform = get_default_transform(image_size=image_size, is_train=False)
     
+    # Use training set for cross-validation
     full_train_dataset = RafDBDataset(root_dir, label_file, transform=train_transform, is_train=True)
-    full_test_dataset = RafDBDataset(root_dir, label_file, transform=test_transform, is_train=False)
+    # Create a version of training dataset with test transform for validation
+    full_val_dataset = RafDBDataset(root_dir, label_file, transform=test_transform, is_train=True)
     
     # Get class weights for loss function
     train_labels = np.array(full_train_dataset.image_files['label'])
@@ -343,26 +410,27 @@ def create_balanced_loaders(
     
     loaders = []
     for split in cv_splits:
-        # Create subset datasets for this fold
         train_indices = split['train_indices']
         val_indices = split['val_indices']
         
-        # Note: In practice, you'd create Subset datasets here
-        # For now, we'll create samplers for the full datasets
+        # Create proper subsets using indices
+        from torch.utils.data import Subset
+        train_subset = Subset(full_train_dataset, train_indices)
+        val_subset = Subset(full_val_dataset, val_indices)
         
-        # Create samplers
+        # Get labels for this split
         train_labels_subset = train_labels[train_indices]
         
         if use_weighted_sampler:
             train_sampler = create_weighted_sampler(train_labels_subset)
-            train_shuffle = False  # Sampler handles ordering
+            train_shuffle = False
         else:
             train_sampler = None
             train_shuffle = True
         
         # Create data loaders
         train_loader = DataLoader(
-            full_train_dataset,
+            train_subset,
             batch_size=batch_size,
             shuffle=train_shuffle,
             sampler=train_sampler,
@@ -371,7 +439,7 @@ def create_balanced_loaders(
         )
         
         val_loader = DataLoader(
-            full_test_dataset,
+            val_subset,
             batch_size=batch_size,
             shuffle=False,
             num_workers=num_workers,

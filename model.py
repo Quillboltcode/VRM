@@ -51,6 +51,7 @@ class RecursiveFER(nn.Module):
         super().__init__()
         self.max_steps = max_steps
         self.hidden_dim = hidden_dim
+        self.num_classes = num_classes
 
         # Embedding layer
         self.embedding = nn.Sequential(

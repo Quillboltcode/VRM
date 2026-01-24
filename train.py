@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
-from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, create_balanced_loaders, create_imagefolder_loaders
+from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, create_balanced_loaders, create_imagefolder_loaders, extract_subject_id
 from loss import PonderLoss
 from model import RecursiveFER
 
@@ -18,7 +18,7 @@ try:
 except ImportError:
     UserSecretsClient = None
 
-def train_single_fold(fold_data, args, device):
+def train_single_fold(fold_data, args, device, wandb_enabled=True):
     """Train model on a single fold."""
     fold_num = fold_data['fold']
     train_loader = fold_data['train_loader']
@@ -29,6 +29,9 @@ def train_single_fold(fold_data, args, device):
     print(f"Training Fold {fold_num + 1}")
     print(f"{'='*50}")
     
+    # Clear GPU memory before creating new model
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
     # Model setup
     model = RecursiveFER(
         in_channels=3, 
@@ -37,19 +40,31 @@ def train_single_fold(fold_data, args, device):
         max_steps=args.max_steps
     ).to(device)
     
-    # Loss with class weights
-    classification_loss = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
+    # Loss with class weights (check dimensions)
+    try:
+        classification_loss = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
+    except RuntimeError as e:
+        if "weight tensor should be defined either for all" in str(e):
+            print(f"Warning: Class weight mismatch ({class_weights.shape[0]} vs {model.num_classes}). Using unweighted loss.")
+            classification_loss = torch.nn.CrossEntropyLoss()
+        else:
+            raise
     criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
     optimizer = optim.AdamW(model.parameters(), lr=args.lr)
     
     # Wandb setup for this fold
-    wandb.init(
-        project="trm-fer-act", 
-        config=args,
-        name=f"fold_{fold_num}",
-        reinit=True
-    )
-    wandb.watch(model)
+    if wandb_enabled:
+        try:
+            wandb.init(
+                project="trm-fer-act", 
+                config=vars(args),  # Convert args to dict
+                name=f"fold_{fold_num}",
+                reinit=True
+            )
+            wandb.watch(model)
+        except Exception as e:
+            print(f"Warning: Wandb initialization failed: {e}")
+            wandb_enabled = False
 
     # Training loop
     best_val_acc = 0.0
@@ -81,41 +96,67 @@ def train_single_fold(fold_data, args, device):
         # Validation
         val_acc, val_avg_steps = evaluate(model, val_loader, device)
 
-        wandb.log({
-            "epoch": epoch,
-            "fold": fold_num,
-            "train_loss": avg_loss,
-            "train_class_loss": avg_class_loss,
-            "train_ponder_cost": avg_ponder_cost,
-            "train_avg_steps": avg_steps,
-            "val_accuracy": val_acc,
-            "val_avg_steps": val_avg_steps,
-        })
+        if wandb_enabled and wandb.run:
+            wandb.log({
+                "epoch": epoch,
+                "fold": fold_num,
+                "train_loss": avg_loss,
+                "train_class_loss": avg_class_loss,
+                "train_ponder_cost": avg_ponder_cost,
+                "train_avg_steps": avg_steps,
+                "val_accuracy": val_acc,
+                "val_avg_steps": val_avg_steps,
+            })
 
         print(f"Fold {fold_num+1} Epoch {epoch+1}: Train Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}, Avg Steps: {val_avg_steps:.2f}")
 
         # Save best model for this fold
         if val_acc > best_val_acc:
             best_val_acc = val_acc
-            output_dir = wandb.run.dir if wandb.run else "."
+            if wandb_enabled and wandb.run:
+                output_dir = wandb.run.dir
+            else:
+                os.makedirs("./checkpoints", exist_ok=True)
+                output_dir = "./checkpoints"
             torch.save(model.state_dict(), os.path.join(output_dir, f"best_model_fold_{fold_num}.pth"))
         
-        # Save checkpoint
-        output_dir = wandb.run.dir if wandb.run else "."
-        torch.save(model.state_dict(), os.path.join(output_dir, f"model_fold_{fold_num}_epoch_{epoch+1}.pth"))
+        # Save checkpoint (only last few epochs to save space)
+        if epoch >= args.epochs - 3:  # Save last 3 epochs only
+            if wandb_enabled and wandb.run:
+                output_dir = wandb.run.dir
+            else:
+                os.makedirs("./checkpoints", exist_ok=True)
+                output_dir = "./checkpoints"
+            torch.save(model.state_dict(), os.path.join(output_dir, f"model_fold_{fold_num}_epoch_{epoch+1}.pth"))
 
-    wandb.finish()
+    if wandb_enabled:
+        try:
+            wandb.finish()
+        except:
+            pass
+    
+    # Clean up model to free memory
+    del model
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
     return best_val_acc
 
 
 def train(args):
     # Wandb setup
+    wandb_enabled = True
     if UserSecretsClient is not None:
-        user_secrets = UserSecretsClient()
-        wandb_api_key = user_secrets.get_secret("wandb_api_secret")
-        wandb.login(key=wandb_api_key)
+        try:
+            user_secrets = UserSecretsClient()
+            wandb_api_key = user_secrets.get_secret("wandb_api_secret")
+            wandb.login(key=wandb_api_key)
+            print("Wandb login successful")
+        except Exception as e:
+            print(f"Wandb login failed: {e}")
+            wandb_enabled = False
     else:
-        print("Wandb API key not found. Logging to console.")
+        print("Wandb API key not found. Disabling wandb logging.")
+        wandb_enabled = False
 
     # Device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -154,16 +195,36 @@ def train(args):
     print("Creating balanced data loaders with cross-validation...")
     try:
         if args.use_imagefolder:
-            cv_loaders = create_imagefolder_loaders(
-                root_dir=root_dir,
-                batch_size=args.batch_size,
-                image_size=args.image_size,
-                num_workers=args.num_workers,
-                use_weighted_sampler=args.use_weighted_sampler,
-                n_splits=args.n_folds,
-                random_state=args.random_state,
-                train_split=args.train_split
-            )
+            try:
+                cv_loaders = create_imagefolder_loaders(
+                    root_dir=root_dir,
+                    batch_size=args.batch_size,
+                    image_size=args.image_size,
+                    num_workers=args.num_workers,
+                    use_weighted_sampler=args.use_weighted_sampler,
+                    n_splits=args.n_folds,
+                    random_state=args.random_state,
+                    train_split=args.train_split
+                )
+            except ValueError as e:
+                if "Cannot have number of splits" in str(e):
+                    print(f"Warning: {e}")
+                    print(f"Falling back to {min(args.n_folds, len(set([extract_subject_id(f) for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))])))} splits based on available groups...")
+                    # Fall back to fewer splits
+                    available_groups = len(set([extract_subject_id(f) for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))]))
+                    actual_splits = min(args.n_folds, max(1, available_groups))
+                    cv_loaders = create_imagefolder_loaders(
+                        root_dir=root_dir,
+                        batch_size=args.batch_size,
+                        image_size=args.image_size,
+                        num_workers=args.num_workers,
+                        use_weighted_sampler=args.use_weighted_sampler,
+                        n_splits=actual_splits,
+                        random_state=args.random_state,
+                        train_split=args.train_split
+                    )
+                else:
+                    raise e
         else:
             if label_file:
                 cv_loaders = create_balanced_loaders(
@@ -183,10 +244,21 @@ def train(args):
             # Train on single specific fold
             if args.single_fold >= len(cv_loaders):
                 print(f"Error: Fold {args.single_fold} not found. Available folds: 0-{len(cv_loaders)-1}")
+                print(f"Total folds created: {len(cv_loaders)}")
+                for i, fold_data in enumerate(cv_loaders):
+                    train_size = len(fold_data['train_loader'].dataset)
+                    val_size = len(fold_data['val_loader'].dataset)
+                    print(f"  Fold {i}: {train_size} train samples, {val_size} val samples")
                 return
             print(f"Training on single fold {args.single_fold}...")
+            print(f"Fold {args.single_fold} details:")
+            train_size = len(cv_loaders[args.single_fold]['train_loader'].dataset)
+            val_size = len(cv_loaders[args.single_fold]['val_loader'].dataset)
+            print(f"  Train samples: {train_size}")
+            print(f"  Val samples: {val_size}")
+            
             fold_data = cv_loaders[args.single_fold]
-            best_acc = train_single_fold(fold_data, args, device)
+            best_acc = train_single_fold(fold_data, args, device, wandb_enabled)
             print(f"\nFinal validation accuracy for fold {args.single_fold}: {best_acc:.4f}")
             
         elif args.use_cross_validation:
@@ -194,7 +266,7 @@ def train(args):
             fold_accuracies = []
             
             for fold_data in cv_loaders:
-                best_acc = train_single_fold(fold_data, args, device)
+                best_acc = train_single_fold(fold_data, args, device, wandb_enabled)
                 fold_accuracies.append(best_acc)
             
             # Print cross-validation results
@@ -210,11 +282,13 @@ def train(args):
             # Train on single split (first fold only)
             print("Training on single split...")
             fold_data = cv_loaders[0]
-            best_acc = train_single_fold(fold_data, args, device)
+            best_acc = train_single_fold(fold_data, args, device, wandb_enabled)
             print(f"\nFinal validation accuracy: {best_acc:.4f}")
             
     except Exception as e:
         print(f"Error creating balanced loaders: {e}")
+        import traceback
+        traceback.print_exc()
         print("Falling back to simple training setup...")
         
         # Fallback to original simple training
@@ -234,20 +308,32 @@ def train(args):
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
         
-        # Model, Loss, Optimizer
-        model = RecursiveFER(in_channels=3, num_classes=7, hidden_dim=args.hidden_dim, max_steps=args.max_steps).to(device)
+        # Model, Loss, Optimizer - detect number of classes from dataset
+        if hasattr(train_dataset, 'class_to_idx'):
+            num_classes = len(train_dataset.class_to_idx)
+        elif hasattr(train_dataset, 'image_files'):
+            num_classes = len(train_dataset.image_files['label'].unique())
+        else:
+            num_classes = 7
+        
+        model = RecursiveFER(in_channels=3, num_classes=num_classes, hidden_dim=args.hidden_dim, max_steps=args.max_steps).to(device)
         classification_loss = torch.nn.CrossEntropyLoss()
         criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
         optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
         # Wandb setup for fallback
-        wandb.init(
-            project="trm-fer-act", 
-            config=args,
-            name="fallback_simple_train",
-            reinit=True
-        )
-        wandb.watch(model)
+        if wandb_enabled:
+            try:
+                wandb.init(
+                    project="trm-fer-act", 
+                    config=vars(args),
+                    name="fallback_simple_train",
+                    reinit=True
+                )
+                wandb.watch(model)
+            except Exception as e:
+                print(f"Warning: Wandb initialization failed: {e}")
+                wandb_enabled = False
 
         # Simple training loop
         for epoch in range(args.epochs):
@@ -274,19 +360,22 @@ def train(args):
             # Validation
             val_acc, val_avg_steps = evaluate(model, test_loader, device)
             
-            wandb.log({
-                "epoch": epoch,
-                "train_loss": avg_loss,
-                "train_avg_steps": avg_steps,
-                "val_accuracy": val_acc,
-                "val_avg_steps": val_avg_steps,
-            })
+            if wandb_enabled:
+                wandb.log({
+                    "epoch": epoch,
+                    "train_loss": avg_loss,
+                    "train_avg_steps": avg_steps,
+                    "val_accuracy": val_acc,
+                    "val_avg_steps": val_avg_steps,
+                })
             
             print(f"Epoch {epoch+1}: Train Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}, Avg Steps: {val_avg_steps:.2f}")
 
             # Save checkpoint
             os.makedirs("./checkpoints", exist_ok=True)
             torch.save(model.state_dict(), f"./checkpoints/model_epoch_{epoch+1}.pth")
+            
+        wandb.finish()
 
 def evaluate(model, dataloader, device):
     model.eval()
