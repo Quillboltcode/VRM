@@ -177,7 +177,7 @@ def get_default_transform(image_size: int = 224, is_train: bool = True):
         ])
 
 
-def get_class_weights(labels: np.ndarray) -> torch.Tensor:
+def get_class_weights(labels: np.ndarray, num_classes: int = None) -> torch.Tensor:
     """
     Calculate class weights for imbalanced dataset.
     Returns weights inversely proportional to class frequencies.
@@ -187,10 +187,14 @@ def get_class_weights(labels: np.ndarray) -> torch.Tensor:
     classes = np.unique(labels)
     weights = compute_class_weight('balanced', classes=classes, y=labels)
     
+    if num_classes is None:
+        num_classes = int(np.max(classes)) + 1 if len(classes) > 0 else 1
+
     # Create weight tensor mapping
-    weight_tensor = torch.zeros(len(classes))
+    weight_tensor = torch.ones(num_classes)
     for i, cls in enumerate(classes):
-        weight_tensor[i] = weights[i]
+        if cls < num_classes:
+            weight_tensor[int(cls)] = weights[i]
     
     return weight_tensor
 
@@ -311,7 +315,8 @@ def create_imagefolder_loaders(
     
     # Get class weights for loss function
     all_labels = np.array(full_dataset.image_files['label'])
-    class_weights = get_class_weights(all_labels)
+    num_classes = len(full_dataset.full_dataset.classes)
+    class_weights = get_class_weights(all_labels, num_classes=num_classes)
     
     # Create cross-validation splits
     cv_splits = create_group_kfold_splits(full_dataset, n_splits=n_splits, random_state=random_state)
@@ -403,7 +408,7 @@ def create_balanced_loaders(
     
     # Get class weights for loss function
     train_labels = np.array(full_train_dataset.image_files['label'])
-    class_weights = get_class_weights(train_labels)
+    class_weights = get_class_weights(train_labels, num_classes=7)
     
     # Create cross-validation splits
     cv_splits = create_group_kfold_splits(full_train_dataset, n_splits=n_splits, random_state=random_state)

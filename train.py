@@ -1,6 +1,7 @@
 
 import argparse
 import os
+import gc
 import numpy as np
 import torch
 import torch.optim as optim
@@ -33,9 +34,10 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     # Model setup
+    num_classes = len(class_weights)
     model = RecursiveFER(
         in_channels=3, 
-        num_classes=7, 
+        num_classes=num_classes, 
         hidden_dim=args.hidden_dim, 
         max_steps=args.max_steps
     ).to(device)
@@ -289,6 +291,14 @@ def train(args):
         print(f"Error creating balanced loaders: {e}")
         import traceback
         traceback.print_exc()
+        
+        # Cleanup memory to avoid OOM in fallback
+        if 'cv_loaders' in locals():
+            del cv_loaders
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
         print("Falling back to simple training setup...")
         
         # Fallback to original simple training
