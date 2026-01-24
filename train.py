@@ -122,17 +122,16 @@ def train(args):
     print(f"Using device: {device}")
 
     # Data paths
+    root_dir = args.root_dir
     if args.use_imagefolder:
-        root_dir = "/kaggle/input/rafdb"  # Or your ImageFolder dataset path
         label_file = None
         print(f"Using ImageFolder dataset from: {root_dir}")
     else:
-        root_dir = "/kaggle/input/rafdb" 
         label_file = os.path.join(root_dir, "EmoLabel/list_patition_label.txt")
         print(f"Using RAF-DB dataset from: {root_dir}")
     
     # Check if dataset exists and create dummy if needed
-    if not args.use_imagefolder and not os.path.exists(label_file):
+    if not args.use_imagefolder and label_file and not os.path.exists(label_file):
         print(f"Dataset not found at {label_file}. Creating dummy dataset for testing.")
         # Create dummy dataset structure
         os.makedirs(os.path.dirname(label_file), exist_ok=True)
@@ -166,16 +165,19 @@ def train(args):
                 train_split=args.train_split
             )
         else:
-            cv_loaders = create_balanced_loaders(
-                root_dir=root_dir,
-                label_file=label_file,
-                batch_size=args.batch_size,
-                image_size=args.image_size,
-                num_workers=args.num_workers,
-                use_weighted_sampler=args.use_weighted_sampler,
-                n_splits=args.n_folds,
-                random_state=args.random_state
-            )
+            if label_file:
+                cv_loaders = create_balanced_loaders(
+                    root_dir=root_dir,
+                    label_file=label_file,
+                    batch_size=args.batch_size,
+                    image_size=args.image_size,
+                    num_workers=args.num_workers,
+                    use_weighted_sampler=args.use_weighted_sampler,
+                    n_splits=args.n_folds,
+                    random_state=args.random_state
+                )
+            else:
+                raise ValueError("label_file is required for RAF-DB dataset")
         
         if args.single_fold is not None:
             # Train on single specific fold
@@ -223,8 +225,11 @@ def train(args):
             train_dataset = ImageFolderDataset(root_dir=root_dir, transform=train_transform, is_train=True, train_split=args.train_split)
             test_dataset = ImageFolderDataset(root_dir=root_dir, transform=test_transform, is_train=False, train_split=args.train_split)
         else:
-            train_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=train_transform, is_train=True)
-            test_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=test_transform, is_train=False)
+            if label_file:
+                train_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=train_transform, is_train=True)
+                test_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=test_transform, is_train=False)
+            else:
+                raise ValueError("label_file is required for RAF-DB dataset")
 
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
@@ -299,6 +304,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_weighted_sampler", action="store_true", help="Use weighted sampler for class balancing")
     parser.add_argument("--use_imagefolder", action="store_true", help="Use ImageFolder dataset format instead of RAF-DB")
     parser.add_argument("--train_split", type=float, default=0.8, help="Train/validation split ratio for ImageFolder")
+    parser.add_argument("--root_dir", type=str, default="/kaggle/input/rafdb", help="Root directory of the dataset")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
     
     args = parser.parse_args()
