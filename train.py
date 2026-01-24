@@ -240,6 +240,15 @@ def train(args):
         criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
         optimizer = optim.AdamW(model.parameters(), lr=args.lr)
 
+        # Wandb setup for fallback
+        wandb.init(
+            project="trm-fer-act", 
+            config=args,
+            name="fallback_simple_train",
+            reinit=True
+        )
+        wandb.watch(model)
+
         # Simple training loop
         for epoch in range(args.epochs):
             model.train()
@@ -264,6 +273,15 @@ def train(args):
 
             # Validation
             val_acc, val_avg_steps = evaluate(model, test_loader, device)
+            
+            wandb.log({
+                "epoch": epoch,
+                "train_loss": avg_loss,
+                "train_avg_steps": avg_steps,
+                "val_accuracy": val_acc,
+                "val_avg_steps": val_avg_steps,
+            })
+            
             print(f"Epoch {epoch+1}: Train Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}, Avg Steps: {val_avg_steps:.2f}")
 
             # Save checkpoint

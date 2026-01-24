@@ -225,8 +225,8 @@ def create_group_kfold_splits(dataset, n_splits: int = 5, random_state: int = 42
         
         subject_ids.append(subject_id)
     
-        subject_ids = np.array(subject_ids)
-        labels = np.array(dataset.image_files['label'])
+    subject_ids = np.array(subject_ids)
+    labels = np.array(dataset.image_files['label'])
     
     # Create GroupKFold splitter
     gkf = GroupKFold(n_splits=n_splits)
