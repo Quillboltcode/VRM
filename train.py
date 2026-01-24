@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
-from dataset import RafDBDataset, get_default_transform, create_balanced_loaders
+from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, create_balanced_loaders, create_imagefolder_loaders
 from loss import PonderLoss
 from model import RecursiveFER
 
@@ -122,11 +122,17 @@ def train(args):
     print(f"Using device: {device}")
 
     # Data paths
-    root_dir = "/kaggle/input/rafdb" 
-    label_file = os.path.join(root_dir, "EmoLabel/list_patition_label.txt")
+    if args.use_imagefolder:
+        root_dir = "/kaggle/input/rafdb"  # Or your ImageFolder dataset path
+        label_file = None
+        print(f"Using ImageFolder dataset from: {root_dir}")
+    else:
+        root_dir = "/kaggle/input/rafdb" 
+        label_file = os.path.join(root_dir, "EmoLabel/list_patition_label.txt")
+        print(f"Using RAF-DB dataset from: {root_dir}")
     
-    # Check if dataset exists
-    if not os.path.exists(label_file):
+    # Check if dataset exists and create dummy if needed
+    if not args.use_imagefolder and not os.path.exists(label_file):
         print(f"Dataset not found at {label_file}. Creating dummy dataset for testing.")
         # Create dummy dataset structure
         os.makedirs(os.path.dirname(label_file), exist_ok=True)
@@ -148,18 +154,40 @@ def train(args):
     # Create balanced loaders with cross-validation
     print("Creating balanced data loaders with cross-validation...")
     try:
-        cv_loaders = create_balanced_loaders(
-            root_dir=root_dir,
-            label_file=label_file,
-            batch_size=args.batch_size,
-            image_size=args.image_size,
-            num_workers=args.num_workers,
-            use_weighted_sampler=args.use_weighted_sampler,
-            n_splits=args.n_folds,
-            random_state=args.random_state
-        )
+        if args.use_imagefolder:
+            cv_loaders = create_imagefolder_loaders(
+                root_dir=root_dir,
+                batch_size=args.batch_size,
+                image_size=args.image_size,
+                num_workers=args.num_workers,
+                use_weighted_sampler=args.use_weighted_sampler,
+                n_splits=args.n_folds,
+                random_state=args.random_state,
+                train_split=args.train_split
+            )
+        else:
+            cv_loaders = create_balanced_loaders(
+                root_dir=root_dir,
+                label_file=label_file,
+                batch_size=args.batch_size,
+                image_size=args.image_size,
+                num_workers=args.num_workers,
+                use_weighted_sampler=args.use_weighted_sampler,
+                n_splits=args.n_folds,
+                random_state=args.random_state
+            )
         
-        if args.use_cross_validation:
+        if args.single_fold is not None:
+            # Train on single specific fold
+            if args.single_fold >= len(cv_loaders):
+                print(f"Error: Fold {args.single_fold} not found. Available folds: 0-{len(cv_loaders)-1}")
+                return
+            print(f"Training on single fold {args.single_fold}...")
+            fold_data = cv_loaders[args.single_fold]
+            best_acc = train_single_fold(fold_data, args, device)
+            print(f"\nFinal validation accuracy for fold {args.single_fold}: {best_acc:.4f}")
+            
+        elif args.use_cross_validation:
             print(f"Training with {args.n_folds}-fold cross-validation...")
             fold_accuracies = []
             
@@ -191,8 +219,12 @@ def train(args):
         train_transform = get_default_transform(image_size=args.image_size, is_train=True)
         test_transform = get_default_transform(image_size=args.image_size, is_train=False)
 
-        train_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=train_transform, is_train=True)
-        test_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=test_transform, is_train=False)
+        if args.use_imagefolder:
+            train_dataset = ImageFolderDataset(root_dir=root_dir, transform=train_transform, is_train=True, train_split=args.train_split)
+            test_dataset = ImageFolderDataset(root_dir=root_dir, transform=test_transform, is_train=False, train_split=args.train_split)
+        else:
+            train_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=train_transform, is_train=True)
+            test_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=test_transform, is_train=False)
 
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
@@ -263,7 +295,10 @@ if __name__ == "__main__":
     parser.add_argument("--num_workers", type=int, default=4, help="Number of workers for dataloader")
     parser.add_argument("--use_cross_validation", action="store_true", help="Use cross-validation instead of single split")
     parser.add_argument("--n_folds", type=int, default=5, help="Number of folds for cross-validation")
+    parser.add_argument("--single_fold", type=int, default=None, help="Train on a single specific fold (0-based)")
     parser.add_argument("--use_weighted_sampler", action="store_true", help="Use weighted sampler for class balancing")
+    parser.add_argument("--use_imagefolder", action="store_true", help="Use ImageFolder dataset format instead of RAF-DB")
+    parser.add_argument("--train_split", type=float, default=0.8, help="Train/validation split ratio for ImageFolder")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
     
     args = parser.parse_args()
