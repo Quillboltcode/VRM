@@ -112,7 +112,7 @@ def train(args):
     # Wandb setup
     if UserSecretsClient is not None:
         user_secrets = UserSecretsClient()
-        wandb_api_key = user_secrets.get_secret("wandb_api_key")
+        wandb_api_key = user_secrets.get_secret("wandb_api_secret")
         wandb.login(key=wandb_api_key)
     else:
         print("Wandb API key not found. Logging to console.")
