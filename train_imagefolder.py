@@ -8,8 +8,7 @@ from tqdm import tqdm
 import wandb
 
 from dataset import ImageFolderDataset, get_default_transform, create_imagefolder_loaders, create_test_loader, extract_subject_id
-from loss import PonderLoss
-from model import RecursiveFERModel as RecursiveFER
+from model import RecursiveFER
 
 
 def train_single_fold(fold_data, args, device, wandb_enabled=True):
