@@ -323,7 +323,7 @@ if __name__ == "__main__":
     parser.add_argument("--single_fold", type=int, default=None, help="Train on a single specific fold (0-based)")
     parser.add_argument("--use_weighted_sampler", action="store_true", help="Use weighted sampler for class balancing")
     parser.add_argument("--train_split", type=float, default=0.8, help="Train/validation split ratio for simple training")
-        parser.add_argument("--root_dir", type=str, default="/kaggle/input/rafdb", help="Root directory of the dataset")
+    parser.add_argument("--root_dir", type=str, default="/kaggle/input/rafdb", help="Root directory of the dataset")
     parser.add_argument("--checkpoint_dir", type=str, default="/kaggle/working/checkpoint", help="Directory to save model checkpoints")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
     parser.add_argument("--run_final_test", action="store_true", help="Run final evaluation on test set after training")
