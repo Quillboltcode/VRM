@@ -42,7 +42,7 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 project="trm-fer-act", 
                 config=vars(args),
                 name=f"run-fold_{fold_num}",
-                dir="/kaggle/working/VRM/wandb",
+                dir="/kaggle/working/VRM/",
                 reinit=True
             )
             wandb.watch(model)
