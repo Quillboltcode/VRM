@@ -1,6 +1,5 @@
 import argparse
 import os
-import gc
 import numpy as np
 import torch
 import torch.optim as optim
@@ -410,47 +409,26 @@ def train_imagefolder_cv(args):
 
     # Create balanced loaders with cross-validation
     print("Creating balanced data loaders with cross-validation...")
-    try:
-        try:
-            cv_loaders = create_imagefolder_loaders(
-                root_dir=root_dir,
-                batch_size=args.batch_size,
-                image_size=args.image_size,
-                num_workers=args.num_workers,
-                use_weighted_sampler=args.use_weighted_sampler,
-                n_splits=args.n_folds,
-                random_state=args.random_state,
-                train_split=args.train_split
-            )
-            
-            # Debug: Print number of classes detected
-            if cv_loaders:
-                first_loader = cv_loaders[0]['train_loader']
-                if hasattr(first_loader.dataset, 'full_dataset'):
-                    num_classes = len(first_loader.dataset.full_dataset.classes)
-                    class_names = first_loader.dataset.full_dataset.classes
-                    print(f"DEBUG: Detected {num_classes} classes: {class_names}")
-                else:
-                    print(f"DEBUG: Could not determine number of classes")
-        except ValueError as e:
-            if "Cannot have number of splits" in str(e):
-                print(f"Warning: {e}")
-                print(f"Falling back to {min(args.n_folds, len(set([extract_subject_id(f) for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))])))} splits based on available groups...")
-                # Fall back to fewer splits
-                available_groups = len(set([extract_subject_id(f) for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))]))
-                actual_splits = min(args.n_folds, max(1, available_groups))
-                cv_loaders = create_imagefolder_loaders(
-                    root_dir=root_dir,
-                    batch_size=args.batch_size,
-                    image_size=args.image_size,
-                    num_workers=args.num_workers,
-                    use_weighted_sampler=args.use_weighted_sampler,
-                    n_splits=actual_splits,
-                    random_state=args.random_state,
-                    train_split=args.train_split
-                )
-            else:
-                raise e
+    cv_loaders = create_imagefolder_loaders(
+        root_dir=root_dir,
+        batch_size=args.batch_size,
+        image_size=args.image_size,
+        num_workers=args.num_workers,
+        use_weighted_sampler=args.use_weighted_sampler,
+        n_splits=args.n_folds,
+        random_state=args.random_state,
+        train_split=args.train_split
+    )
+    
+    # Debug: Print number of classes detected
+    if cv_loaders:
+        first_loader = cv_loaders[0]['train_loader']
+        if hasattr(first_loader.dataset, 'full_dataset'):
+            num_classes = len(first_loader.dataset.full_dataset.classes)
+            class_names = first_loader.dataset.full_dataset.classes
+            print(f"DEBUG: Detected {num_classes} classes: {class_names}")
+        else:
+            print(f"DEBUG: Could not determine number of classes")
     
         if args.single_fold is not None:
             # Train on single specific fold
@@ -509,109 +487,7 @@ def train_imagefolder_cv(args):
             # Final test evaluation for single fold
             if args.run_final_test:
                 run_final_test_evaluation(args, device, [fold_data])
-                
-    except Exception as e:
-        print(f"Error creating balanced loaders: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Cleanup memory to avoid OOM in fallback
-        if 'cv_loaders' in locals():
-            del cv_loaders
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
-            
-        print("Falling back to simple training setup...")
-        
-        # Fallback to original simple training
-        train_transform = get_default_transform(image_size=args.image_size, is_train=True)
-        test_transform = get_default_transform(image_size=args.image_size, is_train=False)
 
-        train_dataset = ImageFolderDataset(root_dir=root_dir, transform=train_transform, is_train=True, train_split=args.train_split)
-        test_dataset = ImageFolderDataset(root_dir=root_dir, transform=test_transform, is_train=False, train_split=args.train_split)
-
-        train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
-        test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        
-        # Model, Loss, Optimizer - detect number of classes from dataset
-        if hasattr(train_dataset, 'class_to_idx'):
-            num_classes = len(train_dataset.class_to_idx)
-            print(f"Detected {num_classes} classes: {train_dataset.classes}")
-        else:
-            num_classes = 7
-        
-        model = RecursiveFER(in_channels=3, num_classes=num_classes, hidden_dim=args.hidden_dim, max_steps=args.max_steps).to(device)
-        classification_loss = torch.nn.CrossEntropyLoss()
-        criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
-        optimizer = optim.AdamW(model.parameters(), lr=args.lr)
-
-        # Wandb setup for fallback
-        if wandb_enabled:
-            try:
-                wandb.init(
-                    project="trm-fer-act", 
-                    config=args,
-                    name="fallback_simple_train",
-                    reinit=True
-                )
-                wandb.watch(model)
-            except Exception as e:
-                print(f"Warning: Wandb initialization failed: {e}")
-                wandb_enabled = False
-
-        # Simple training loop
-        for epoch in range(args.epochs):
-            model.train()
-            total_loss, total_class_loss, total_ponder_cost, total_steps = 0, 0, 0, 0
-            
-            for images, labels in tqdm(train_loader, desc=f"Epoch {epoch+1}/{args.epochs}"):
-                images, labels = images.to(device), labels.to(device)
-
-                optimizer.zero_grad()
-                logits, num_steps = model(images)
-                loss, class_loss, ponder_cost = criterion(logits, labels, num_steps)
-                loss.backward()
-                optimizer.step()
-                
-                total_loss += loss.item()
-                total_class_loss += class_loss.item()
-                total_ponder_cost += ponder_cost.item()
-                total_steps += num_steps.mean().item()
-
-            avg_loss = total_loss / len(train_loader)
-            avg_steps = total_steps / len(train_loader)
-
-            # Validation
-            from train import evaluate
-            val_acc, val_avg_steps = evaluate(model, test_loader, device)
-            
-            if wandb_enabled:
-                wandb.log({
-                    "epoch": epoch,
-                    "train_loss": avg_loss,
-                    "train_avg_steps": avg_steps,
-                    "val_accuracy": val_acc,
-                    "val_avg_steps": val_avg_steps,
-                })
-            
-            print(f"Epoch {epoch+1}: Train Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}, Avg Steps: {val_avg_steps:.2f}")
-
-            # Use specified checkpoint directory or default to ./checkpoints
-            if args.checkpoint_dir:
-                checkpoint_dir = args.checkpoint_dir
-                os.makedirs(checkpoint_dir, exist_ok=True)
-                output_dir = checkpoint_dir
-            else:
-                os.makedirs("./checkpoints", exist_ok=True)
-                output_dir = "./checkpoints"
-            torch.save(model.state_dict(), f"./checkpoints/model_epoch_{epoch+1}.pth")
-            
-        if wandb_enabled:
-            try:
-                wandb.finish()
-            except:
-                pass
 
 
 if __name__ == "__main__":
