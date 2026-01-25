@@ -42,7 +42,7 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 project="trm-fer-act", 
                 config=vars(args),
                 name=f"run-fold_{fold_num}",
-                dir="/kaggle/working/vrm/wandb",
+                dir="/kaggle/working/VRM/wandb",
                 reinit=True
             )
             wandb.watch(model)
@@ -287,7 +287,7 @@ def run_final_test_evaluation(args, device, cv_loaders=None):
         import glob
         
         # First try to find models in wandb directories
-        wandb_base_dir = "/kaggle/working/vrm/wandb"
+        wandb_base_dir = "/kaggle/working/VRM/wandb"
         if os.path.exists(wandb_base_dir):
             # Look for run-* directories (Kaggle format: run-YYYYMMDD-hash)
             wandb_run_dirs = glob.glob(os.path.join(wandb_base_dir, "run-*"))
