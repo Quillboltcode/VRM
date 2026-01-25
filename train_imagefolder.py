@@ -131,9 +131,10 @@ def evaluate(model, dataloader, device):
 def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
     """
     Perform final evaluation on test set using best models from each fold.
-    Handles models from both wandb directories and checkpoints.
+    Runs comprehensive analysis from analysis.py instead of basic metrics.
     """
     from collections import defaultdict
+    from analysis import ModelAnalyzer
     
     print(f"\n{'='*60}")
     print("FINAL TEST SET EVALUATION")
@@ -249,6 +250,55 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
         ensemble_correct = sum(1 for pred, true in zip(ensemble_predictions, all_labels) if pred == true)
         ensemble_accuracy = 100 * ensemble_correct / len(all_labels)
         print(f"Ensemble Test Accuracy: {ensemble_accuracy:.4f}")
+    
+    print(f"\n{'='*60}")
+    print("RUNNING COMPREHENSIVE ANALYSIS")
+    print(f"{'='*60}")
+    
+    # Run comprehensive analysis on best performing model
+    best_fold_num = max(fold_results.keys(), key=lambda k: fold_results[k]['accuracy'])
+    best_fold_path = None
+    
+    for model_path in model_paths:
+        if f"best_model_fold_{best_fold_num}" in model_path:
+            best_fold_path = model_path
+            break
+    
+    if best_fold_path and os.path.exists(best_fold_path):
+        print(f"\nRunning detailed analysis on best performing model (Fold {best_fold_num})...")
+        print(f"Best model path: {best_fold_path}")
+        
+        try:
+            # Initialize analyzer with the best model
+            analyzer = ModelAnalyzer(best_fold_path, str(device))
+            
+            # Run analysis
+            results_df = analyzer.run_inference(test_loader)
+            
+            # Generate all analysis plots and reports
+            output_dir = f"./analysis_results_fold_{best_fold_num}"
+            os.makedirs(output_dir, exist_ok=True)
+            
+            print("Generating confidence vs steps plot...")
+            analyzer.plot_confidence_vs_steps(os.path.join(output_dir, "confidence_vs_steps.png"))
+            
+            print("Generating steps per class plot...")
+            analyzer.plot_steps_per_class(os.path.join(output_dir, "steps_per_class.png"))
+            
+            print("Generating extreme examples visualization...")
+            analyzer.visualize_extreme_examples(test_loader, output_dir)
+            
+            print("Generating summary report...")
+            report = analyzer.generate_summary_report(os.path.join(output_dir, "summary_report.txt"))
+            
+            print(f"\nComprehensive analysis complete! Results saved to {output_dir}")
+            
+        except Exception as e:
+            print(f"Error during comprehensive analysis: {e}")
+            import traceback
+            traceback.print_exc()
+    else:
+        print(f"Warning: Could not find best model file for detailed analysis")
     
     print(f"{'='*60}")
     
