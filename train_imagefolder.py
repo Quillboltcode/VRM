@@ -81,6 +81,9 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 "train_loss": avg_loss,
                 "val_accuracy": val_acc,
                 "val_avg_steps": val_avg_steps,
+                "class_loss": avg_class_loss,
+                "ponder_cost": avg_ponder_cost,
+                "avg_steps": avg_steps
             })
 
         print(f"Fold {fold_num+1} Epoch {epoch+1}: Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}")
