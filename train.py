@@ -461,7 +461,7 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
             del fold_model
             continue
         
-        fold_model.eval()
+        fold_model.eval()  # noqa: F821
         
         # Collect predictions for this fold
         fold_predictions = []
@@ -471,7 +471,7 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
         with torch.no_grad():
             for images, labels in test_loader:
                 images, labels = images.to(device), labels.to(device)
-                logits, num_steps = fold_model(images)
+                logits, num_steps = fold_model(images)  # noqa: F821
                 _, predicted = torch.max(logits.data, 1)
                 
                 fold_predictions.extend(predicted.cpu().numpy())
@@ -500,7 +500,7 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
             all_labels = fold_labels
         
         # Clean up model to free memory
-        del fold_model
+        del fold_model  # noqa: F821
         torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     if not all_predictions:
