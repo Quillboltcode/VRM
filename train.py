@@ -118,8 +118,8 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
             if wandb_enabled and wandb.run:
                 output_dir = wandb.run.dir
             else:
-                os.makedirs("./checkpoints", exist_ok=True)
-                output_dir = "./checkpoints"
+                os.makedirs("/kaggle/working/checkpoint", exist_ok=True)
+                output_dir = "/kaggle/working/checkpoint"
             torch.save(model.state_dict(), os.path.join(output_dir, f"best_model_fold_{fold_num}.pth"))
         
         # Save checkpoint (only last few epochs to save space)
@@ -348,9 +348,10 @@ def train(args):
             
             print(f"Epoch {epoch+1}: Train Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}, Avg Steps: {val_avg_steps:.2f}")
 
-            # Save checkpoint
-            os.makedirs("./checkpoints", exist_ok=True)
-            torch.save(model.state_dict(), f"./checkpoints/model_epoch_{epoch+1}.pth")
+            # Save checkpoint to kaggle working directory
+        checkpoint_dir = "/kaggle/working/checkpoint"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_epoch_{epoch+1}.pth"))
             
         wandb.finish()
 
@@ -549,6 +550,7 @@ if __name__ == "__main__":
     parser.add_argument("--single_fold", type=int, default=None, help="Train on a single specific fold (0-based)")
     parser.add_argument("--use_weighted_sampler", action="store_true", help="Use weighted sampler for class balancing")
     parser.add_argument("--root_dir", type=str, default="/kaggle/input/rafdb", help="Root directory of the dataset")
+    parser.add_argument("--checkpoint_dir", type=str, default="/kaggle/working/checkpoint", help="Directory to save model checkpoints")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
     parser.add_argument("--run_final_test", action="store_true", help="Run final evaluation on test set after training")
     
