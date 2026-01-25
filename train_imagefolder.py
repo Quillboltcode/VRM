@@ -418,7 +418,8 @@ def train_imagefolder_cv(args):
             val_size = len(cv_loaders[args.single_fold]['val_loader'].dataset)
             print(f"  Train samples: {train_size}")
             print(f"  Val samples: {val_size}")
-            
+            print(f"  Class weights: {cv_loaders[args.single_fold]['class_weights']}")
+            print(f"Num classes: {len(cv_loaders[args.single_fold]['class_weights'])}")
             fold_data = cv_loaders[args.single_fold]
             best_acc = train_single_fold(fold_data, args, device, wandb_enabled)
             print(f"\nFinal validation accuracy for fold {args.single_fold}: {best_acc:.4f}")
@@ -486,6 +487,7 @@ def train_imagefolder_cv(args):
         # Model, Loss, Optimizer - detect number of classes from dataset
         if hasattr(train_dataset, 'class_to_idx'):
             num_classes = len(train_dataset.class_to_idx)
+            print(f"Detected {num_classes} classes: {train_dataset.classes}")
         else:
             num_classes = 7
         
