@@ -10,8 +10,249 @@ import wandb
 
 from dataset import ImageFolderDataset, get_default_transform, create_imagefolder_loaders, create_test_loader, extract_subject_id
 from loss import PonderLoss
-from model import RecursiveFER
-from train import train_single_fold, final_test_evaluation
+from model import RecursiveFERModel as RecursiveFER
+
+
+def train_single_fold(fold_data, args, device, wandb_enabled=True):
+    """Simplified train model on a single fold."""
+    fold_num = fold_data['fold']
+    train_loader = fold_data['train_loader']
+    val_loader = fold_data['val_loader']
+    class_weights = fold_data['class_weights']
+    
+    print(f"Training Fold {fold_num + 1}")
+    
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    num_classes = len(class_weights)
+    model = RecursiveFER(
+        in_channels=3, 
+        num_classes=num_classes, 
+        hidden_dim=args.hidden_dim, 
+        max_steps=args.max_steps
+    ).to(device)
+    
+    classification_loss = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
+    criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    
+    if wandb_enabled:
+        try:
+            wandb.init(
+                project="trm-fer-act", 
+                config=vars(args),
+                name=f"run-fold_{fold_num}",
+                dir="/kaggle/working/vrm/wandb",
+                reinit=True
+            )
+            wandb.watch(model)
+        except:
+            wandb_enabled = False
+
+    best_val_acc = 0.0
+    for epoch in range(args.epochs):
+        model.train()
+        total_loss, total_class_loss, total_ponder_cost, total_steps = 0, 0, 0, 0
+        
+        for images, labels in tqdm(train_loader, desc=f"Fold {fold_num+1} Epoch {epoch+1}/{args.epochs}"):
+            images, labels = images.to(device), labels.to(device)
+
+            optimizer.zero_grad()
+            logits, num_steps = model(images)
+            loss, class_loss, ponder_cost = criterion(logits, labels, num_steps)
+            loss.backward()
+            optimizer.step()
+            
+            total_loss += loss.item()
+            total_class_loss += class_loss.item()
+            total_ponder_cost += ponder_cost.item()
+            total_steps += num_steps.mean().item()
+
+        avg_loss = total_loss / len(train_loader)
+        avg_class_loss = total_class_loss / len(train_loader)
+        avg_ponder_cost = total_ponder_cost / len(train_loader)
+        avg_steps = total_steps / len(train_loader)
+
+        val_acc, val_avg_steps = evaluate(model, val_loader, device)
+
+        if wandb_enabled:
+            wandb.log({
+                "epoch": epoch,
+                "fold": fold_num,
+                "train_loss": avg_loss,
+                "val_accuracy": val_acc,
+                "val_avg_steps": val_avg_steps,
+            })
+
+        print(f"Fold {fold_num+1} Epoch {epoch+1}: Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}")
+
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            if wandb_enabled and wandb.run:
+                output_dir = wandb.run.dir
+                wandb.save(os.path.join(output_dir, f"best_model_fold_{fold_num}.pth"))
+            else:
+                output_dir = "./checkpoints"
+                os.makedirs(output_dir, exist_ok=True)
+            torch.save(model.state_dict(), os.path.join(output_dir, f"best_model_fold_{fold_num}.pth"))
+
+    if wandb_enabled:
+        try:
+            wandb.finish()
+        except:
+            pass
+    
+    del model
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    return best_val_acc
+
+
+def evaluate(model, dataloader, device):
+    """Simple evaluation function."""
+    model.eval()
+    correct = 0
+    total = 0
+    total_steps = 0
+    with torch.no_grad():
+        for images, labels in dataloader:
+            images, labels = images.to(device), labels.to(device)
+            logits, num_steps = model(images)
+            _, predicted = torch.max(logits.data, 1)
+            total += labels.size(0)
+            correct += (predicted == labels).sum().item()
+            total_steps += num_steps.mean().item()
+    
+    accuracy = 100 * correct / total
+    avg_steps = total_steps / len(dataloader)
+    return accuracy, avg_steps
+
+
+def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
+    """
+    Perform final evaluation on test set using best models from each fold.
+    Handles models from both wandb directories and checkpoints.
+    """
+    from collections import defaultdict
+    
+    print(f"\n{'='*60}")
+    print("FINAL TEST SET EVALUATION")
+    print(f"{'='*60}")
+    
+    # Determine number of classes from test dataset
+    if hasattr(test_dataset, 'full_dataset'):
+        num_classes = len(test_dataset.full_dataset.classes)
+    elif hasattr(test_dataset, 'image_files'):
+        num_classes = len(np.unique(test_dataset.image_files['label']))
+    else:
+        num_classes = 7
+    
+    all_predictions = defaultdict(list)
+    all_labels = []
+    fold_results = {}
+    
+    # Evaluate each fold's best model
+    for fold_path in model_paths:
+        if not os.path.exists(fold_path):
+            print(f"Warning: Model file not found: {fold_path}")
+            continue
+            
+        # Extract fold number from path (handles both wandb and checkpoint paths)
+        fold_num = None
+        if "best_model_fold_" in fold_path:
+            fold_num = fold_path.split('best_model_fold_')[-1].split('.')[0]
+        else:
+            print(f"Warning: Cannot extract fold number from path: {fold_path}")
+            continue
+            
+        print(f"\nEvaluating fold {fold_num} model from: {fold_path}")
+        
+        # Load model
+        fold_model = RecursiveFER(
+            in_channels=3, 
+            num_classes=num_classes, 
+            hidden_dim=128, 
+            max_steps=10
+        ).to(device)
+        
+        try:
+            fold_model.load_state_dict(torch.load(fold_path, map_location=device))
+        except Exception as e:
+            print(f"Error loading model {fold_path}: {e}")
+            del fold_model
+            continue
+        
+        fold_model.eval()
+        
+        # Collect predictions for this fold
+        fold_predictions = []
+        fold_labels = []
+        total_steps = 0
+        
+        with torch.no_grad():
+            for images, labels in test_loader:
+                images, labels = images.to(device), labels.to(device)
+                logits, num_steps = fold_model(images)
+                _, predicted = torch.max(logits.data, 1)
+                
+                fold_predictions.extend(predicted.cpu().numpy())
+                fold_labels.extend(labels.cpu().numpy())
+                total_steps += num_steps.mean().item()
+        
+        # Calculate fold accuracy
+        fold_correct = sum(1 for pred, true in zip(fold_predictions, fold_labels) if pred == true)
+        fold_accuracy = 100 * fold_correct / len(fold_labels)
+        fold_avg_steps = total_steps / len(test_loader)
+        
+        fold_results[fold_num] = {
+            'accuracy': fold_accuracy,
+            'predictions': fold_predictions,
+            'avg_steps': fold_avg_steps
+        }
+        
+        print(f"Fold {fold_num} Test Accuracy: {fold_accuracy:.4f}")
+        print(f"Fold {fold_num} Avg Steps: {fold_avg_steps:.2f}")
+        
+        # Store predictions for ensemble
+        all_predictions[fold_num] = fold_predictions
+        
+        # Store labels (only once)
+        if not all_labels:
+            all_labels = fold_labels
+        
+        # Clean up model to free memory
+        del fold_model
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    if not all_predictions:
+        print("No valid models found for evaluation.")
+        return
+    
+    # Calculate individual fold statistics
+    fold_accuracies = [result['accuracy'] for result in fold_results.values()]
+    print(f"\nIndividual Fold Results:")
+    for fold_num, result in fold_results.items():
+        print(f"  Fold {fold_num}: {result['accuracy']:.4f}")
+    print(f"Mean Fold Accuracy: {np.mean(fold_accuracies):.4f} ± {np.std(fold_accuracies):.4f}")
+    
+    # Ensemble prediction (majority vote)
+    if len(all_predictions) > 1:
+        print(f"\nEnsemble Evaluation:")
+        ensemble_predictions = []
+        for i in range(len(all_labels)):
+            # Get predictions from all folds for this sample
+            sample_predictions = [preds[i] for preds in all_predictions.values()]
+            # Majority vote
+            ensemble_pred = max(set(sample_predictions), key=sample_predictions.count)
+            ensemble_predictions.append(ensemble_pred)
+        
+        ensemble_correct = sum(1 for pred, true in zip(ensemble_predictions, all_labels) if pred == true)
+        ensemble_accuracy = 100 * ensemble_correct / len(all_labels)
+        print(f"Ensemble Test Accuracy: {ensemble_accuracy:.4f}")
+    
+    print(f"{'='*60}")
+    
+    return fold_results
 
 
 def run_final_test_evaluation(args, device, cv_loaders=None):
@@ -43,10 +284,23 @@ def run_final_test_evaluation(args, device, cv_loaders=None):
         
         # Find all saved models
         model_paths = []
-        
-        # Find models in checkpoints directory
         import glob
-        model_paths = glob.glob("./checkpoints/best_model_fold_*.pth")
+        
+        # First try to find models in wandb directories
+        wandb_base_dir = "/kaggle/working/vrm/wandb"
+        if os.path.exists(wandb_base_dir):
+            # Look for run-* directories (Kaggle format: run-YYYYMMDD-hash)
+            wandb_run_dirs = glob.glob(os.path.join(wandb_base_dir, "run-*"))
+            for run_dir in wandb_run_dirs:
+                # Check both the run directory and its "files" subdirectory
+                for search_dir in [run_dir, os.path.join(run_dir, "files")]:
+                    if os.path.exists(search_dir):
+                        model_files = glob.glob(os.path.join(search_dir, "best_model_fold_*.pth"))
+                        model_paths.extend(model_files)
+        
+        # If no models found in wandb, fallback to checkpoints directory
+        if not model_paths:
+            model_paths = glob.glob("./checkpoints/best_model_fold_*.pth")
         
         if not model_paths:
             print("Warning: No saved models found for final evaluation.")
@@ -72,7 +326,7 @@ except ImportError:
 
 def train_imagefolder_cv(args):
     """
-    Train RecursiveFER model with ImageFolder dataset using GroupKFold cross-validation.
+    Train RecursiveFERModel model with ImageFolder dataset using GroupKFold cross-validation.
     """
     # Wandb setup
     wandb_enabled = True
@@ -309,7 +563,7 @@ def train_imagefolder_cv(args):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train RecursiveFER model with ImageFolder dataset and GroupKFold cross-validation.")
+    parser = argparse.ArgumentParser(description="Train RecursiveFERModel model with ImageFolder dataset and GroupKFold cross-validation.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")

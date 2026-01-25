@@ -4,11 +4,11 @@ Test script to verify the model architecture works correctly.
 """
 
 import torch
-from model import RecursiveFER
+from model import RecursiveFERModel
 
 def test_model():
     """Test the model with dummy input."""
-    print("Testing RecursiveFER model...")
+    print("Testing RecursiveFERModel model...")
     
     # Model parameters
     batch_size = 4
@@ -19,7 +19,7 @@ def test_model():
     image_size = 224
     
     # Initialize model
-    model = RecursiveFER(
+    model = RecursiveFERModel(
         in_channels=in_channels,
         num_classes=num_classes,
         hidden_dim=hidden_dim,
@@ -69,7 +69,7 @@ def test_loss_integration():
     max_steps = 5
     
     # Initialize model and loss
-    model = RecursiveFER(
+    model = RecursiveFERModel(
         in_channels=3,
         num_classes=num_classes,
         hidden_dim=hidden_dim,

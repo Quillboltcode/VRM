@@ -1,116 +1,108 @@
 
 
-# gemini.md
-
 ## **Context: Research Project – Adaptive Recursive CNN for FER**
 
-You are an expert Computer Vision Researcher and PyTorch Engineer. You are helping me build a research codebase for a specific novel architecture: **Recursive Convolutional Networks with Adaptive Computation Time (ACT)** applied to Facial Expression Recognition (FER).
+You are an expert PyTorch Researcher. You are building a novel **Recursive Convolutional Network with Adaptive Computation Time (ACT)** for Facial Expression Recognition (RAF-DB/AffectNet).
 
-### **The Core Idea**
-
-Standard CNNs (like ResNet) use fixed depth. We hypothesize that some facial expressions are "easy" (e.g., clearly Happy) and need shallow processing, while others are "ambiguous" (e.g., Contempt vs. Neutral) and need deeper, iterative refinement.
-
-* **Architecture:** A "Tiny" recursive backbone that loops a single block  times.
-* **Mechanism:** A **Halting Gate** (sigmoidal output) that decides when to stop processing for each image.
-* **Datasets:** RAF-DB (Real-world Affective Faces) and AffectNet.
+**Core Hypothesis:** Harder facial expressions (e.g., Contempt, Fear) require more processing steps than easier ones (e.g., Happy). We use a recursive loop to "think" longer on hard samples.
 
 ---
 
-## **Technical Specification**
+## **Technical Specifications (The "Improved" Architecture)**
 
-### **1. Dependencies**
+### **1. Model Architecture (`model.py`)**
 
-The codebase must utilize:
+You must implement `RecursiveFER` with the following strict logic to avoid "spatial lobotomy" and "broken gradients":
 
-* `torch`, `torchvision` (Latest stable)
-* `albumentations` (For heavy data augmentation: ShiftScaleRotate, Cutout, ColorJitter)
-* `timm` (For referencing baseline architectures if needed)
-* `wandb` (For logging accuracy vs. average steps taken)
-* `scikit-learn` (For confusion matrices and weighted F1-score)
-
-### **2. The Recursive Model Architecture (`model.py`)**
-
-You must implement a class `RecursiveFER` with:
-
-* **Embedding Layer:** A small standard CNN stem (e.g., 2 Conv layers) to project the image () into a hidden state  (e.g., ).
-* **Recursive Block:** A single `nn.Module` that takes state  and outputs .
-* *Components:* Conv3x3 -> GroupNorm -> GELU -> Conv3x3.
-* *Memory:* A GRUCell or a Residual Link ().
+* **Input Stem:** 2 Conv layers + GroupNorm + GELU to project .
+* **Recursive Block (The Loop):**
+* **Input:** 4D Tensor . **DO NOT FLATTEN.**
+* **Operation:** .
+* *Note:* Maintain spatial dimensions throughout the recursion.
 
 
-* **Halting Unit (ACT):**
-* A small dense layer that looks at  (pooled) and outputs a probability .
-* **Logic:** Stop when cumulative probability  or when .
+* **Halting Mechanism (Differentiable ACT):**
+* **Halting Head:** GlobalAvgPool  Linear  Sigmoid.
+* **Logic:**
+* Calculate  at step .
+* Calculate .
+* Accumulate Output: .
+* Accumulate Cost: .
+* Update Remaining: .
 
 
-* **Classifier Head:** A final linear layer mapping the final state to Class Logits (7 classes for RAF-DB).
-
-### **3. Loss Function (`loss.py`)**
-
-The loss must be a combination of:
-
-1. **Classification Loss:** CrossEntropy on the final prediction.
-2. **Ponder Cost:** A regularization term to penalize thinking too long.
-* 
-* Where  is the "remainder" or average steps taken.
 
 
-3. **Deep Supervision (Optional):** You may implement an option to calculate loss at *every* step to stabilize training.
 
-### **4. Data Pipeline (`dataset.py`)**
+### **2. Loss Function (`loss.py`)**
 
-* **RAF-DB:** An `ImagefolderDataset` with only train folder and test folder with **7 Basic emotions**
-* **Balancing:** The training set is imbalanced. Implement `WeightedRandomSampler` or class weighting in the Loss function.
+Implement `DifferentiablePonderLoss`:
 
-### **5. Experiment Tracking (`train.py`)**
+* **Equation:** .
+* **Class-Aware Weighting:**
+* Allow passing `class_weights` to the Ponder Loss.
+* *Logic:* Multiply the ponder cost by a factor based on the target class (e.g., penalize "Happy" heavily if it takes long, be lenient on "Surprise").
 
-* We need to track **Accuracy** and **Average Steps** simultaneously.
-* **Proof of Concept Goal:** Show that "Easy" images (High confidence) use fewer steps than "Hard" images.
 
----
 
-## **Task Instructions**
+### **3. Data Pipeline (`dataset.py`)**
 
-When I ask you to generate code, follow these rules:
+* **Dataset:** RAF-DB (7 classes).
+* **Augmentation (Albumentations):**
+* ShiftScaleRotate, HorizontalFlip, CoarseDropout (Cutout), ColorJitter.
+* *Critical:* FER datasets are small; heavy augmentation prevents overfitting.
 
-1. **Modular Code:** Do not dump one giant file. Separate `model.py`, `dataset.py`, `train.py`.
-2. **Type Hinting:** Use `def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:`
-3. **ACT Implementation:** Be very careful with the Adaptive Computation Time logic. It is tricky to batch. You can implement the "Naïve" version first (masking out finished samples in the batch).
-4. **Visualize:** Provide a snippet to visualize which images took 1 step vs. 10 steps.
-Provide histogram for **Average step per class** for RAFDB dataset.
+
+* **Kaggle Optimization:**
+* If running on Kaggle, unzip the dataset from `/kaggle/input` to `/kaggle/working` **before** initializing the DataLoader to avoid I/O bottlenecks.
+
+
 
 ---
 
-## **Plan of Action**
+## **Implementation Plan**
 
-1. **Setup:** Create the file structure and using `uv add` or `uv pip install` for dependencies.
-2. **Data:** Write the `RafDBDataset` loader.
-3. **Model:** Implement the `RecursiveBlock` and `HaltingMechanism`.
-4. **Train:** Write the training loop with Ponder Loss.
-5. **Analyze:** Create a script to run inference and plot "Steps Taken" histograms.
+### **Step 1: Setup & Data (`dataset.py`, `utils.py`)**
+
+* Create a `RafDBDataset` class that parses the `train_label.txt` file.
+* Implement a helper function `extract_dataset()` for Kaggle.
+* **Action:** Write the dataset class with Albumentations support.
+
+### **Step 2: The Model (`model.py`)**
+
+* Implement the `RecursiveFER` class using the **Graves ACT accumulation logic**.
+* **Constraint:** Ensure `forward` returns `(logits, ponder_cost, step_probs_list)`.
+* **Action:** Write the model code focusing on the `for` loop logic to ensure gradients flow back to the Halting Head.
+
+### **Step 3: Training Loop (`train.py`)**
+
+* Use `wandb` to log:
+* `Train/Loss`, `Train/Accuracy`.
+* `ACT/Average_Steps`: The mean of the ponder cost.
+* `ACT/Steps_Per_Class`: (Optional) Log average steps broken down by emotion.
+
+
+* **Optimization:** Use `torch.optim.AdamW` with Cosine Annealing scheduler.
+
+### **Step 4: Evaluation & Visualization**
+
+* Create a script to run inference on the Test Set.
+* **Plot:** A histogram showing the distribution of "Steps Taken" for the whole dataset.
+* **Plot:** A "Confusion Matrix of Steps" (e.g., X-axis = Emotion, Y-axis = Avg Steps).
 
 ---
 
-## **Appendix: Kaggle Environment Constraints**
+## **Coding Constraints**
 
-**IMPORTANT:** We are running this on Kaggle. Adapt the code accordingly:
+1. **Type Hints:** Use `Tensor`, `List`, `Tuple` typing everywhere.
+2. **Modularity:** Keep the `RecursiveBlock` separate from the main `RecursiveFER` class.
+3. **Stability:** Initialize the Halting Head bias to a slightly positive value (e.g., `+1.0`) to encourage the model to output higher halting probabilities initially (prevents "thinking forever" at the start).
 
-1. **Data Loading:**
-* Assume the dataset is a `ImagefodlerDataset` with file located at `/kaggle/input/rafdb/`.
-* Set `num_workers=4` (Kaggle has 2-4 CPU cores usually; setting it too high crashes).
-* Split data using GroupKFold for testing with seed for repo reproducibility.
+---
 
+## **Kaggle Specific Instructions**
 
-2. **Output & Logging:**
-* All outputs must go to `/kaggle/working/`.
-* Integrate `wandb` for logging Loss, Accuracy, and **Average Recursion Depth** per epoch.
-* Code must retrieve the WandB API key using `kaggle_secrets`.
-
-
-3. **Memory Management:**
-* The P100 GPU has 16GB VRAM.
-* Since we are unrolling the loop  times, memory usage grows linearly with .
-* If OOM (Out of Memory) occurs, instruct to reduce `batch_size` or implement **Gradient Checkpointing** (`torch.utils.checkpoint`) on the Recursive Block.
-
-
+* Assume input data is at `/kaggle/input/raf-db-dataset/`.
+* Save all checkpoints to `/kaggle/working/checkpoints/`.
+* Use `kaggle_secrets` to retrieve the `WANDB_API_KEY`.
 

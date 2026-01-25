@@ -6,14 +6,14 @@ Test script to verify the analysis.py implementation works correctly.
 import os
 import torch
 import pandas as pd
-from model import RecursiveFER
+from model import RecursiveFERModel
 from dataset import RafDBDataset, get_default_transform
 from torch.utils.data import DataLoader
 from analysis import ModelAnalyzer
 
 def create_dummy_checkpoint():
     """Create a dummy model checkpoint for testing."""
-    model = RecursiveFER(in_channels=3, num_classes=7, hidden_dim=128, max_steps=10)
+    model = RecursiveFERModel(in_channels=3, num_classes=7, hidden_dim=128, max_steps=10)
     checkpoint_path = "dummy_model.pth"
     torch.save(model.state_dict(), checkpoint_path)
     print(f"Created dummy checkpoint: {checkpoint_path}")

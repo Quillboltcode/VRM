@@ -1,7 +1,7 @@
 
 #!/usr/bin/env python3
 """
-Analysis script for RecursiveFER model with Adaptive Computation Time.
+Analysis script for RecursiveFERModel model with Adaptive Computation Time.
 Implements visualizations and analysis as specified in gemini.md.
 """
 
@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, EMOTION_MAPPING
-from model import RecursiveFER
+from model import RecursiveFERModel
 
 # Kaggle specific imports
 try:
@@ -31,7 +31,7 @@ except ImportError:
 
 
 class ModelAnalyzer:
-    """Class for analyzing trained RecursiveFER models."""
+    """Class for analyzing trained RecursiveFERModel models."""
     
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -39,7 +39,7 @@ class ModelAnalyzer:
         self.model = None
         self.results_df = None
         
-    def load_model(self, checkpoint_path: str = None) -> RecursiveFER:
+    def load_model(self, checkpoint_path: str = None) -> RecursiveFERModel:
         """Load a trained model checkpoint."""
         if checkpoint_path is None:
             checkpoint_path = self.checkpoint_path
@@ -47,7 +47,7 @@ class ModelAnalyzer:
         print(f"Loading model from {checkpoint_path}")
         
         # Initialize model with default parameters (adjust as needed)
-        self.model = RecursiveFER(
+        self.model = RecursiveFERModel(
             in_channels=3,
             num_classes=7,  # Will be updated based on checkpoint
             hidden_dim=128,
@@ -78,7 +78,7 @@ class ModelAnalyzer:
                 num_classes = 7  # Default fallback
                 print("DEBUG: No test data available, using default 7")
         
-        self.model = RecursiveFER(
+        self.model = RecursiveFERModel(
             in_channels=3,
             num_classes=num_classes,
             hidden_dim=128,
@@ -342,7 +342,7 @@ class ModelAnalyzer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze RecursiveFER model")
+    parser = argparse.ArgumentParser(description="Analyze RecursiveFERModel model")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--data_root", type=str, default="/kaggle/input/rafdb", help="Root directory for dataset")
     parser.add_argument("--use_imagefolder", action="store_true", help="Use ImageFolder dataset instead of RAF-DB")

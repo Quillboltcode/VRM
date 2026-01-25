@@ -11,7 +11,7 @@ import wandb
 
 from dataset import RafDBDataset, get_default_transform, create_balanced_loaders, create_test_loader, extract_subject_id
 from loss import PonderLoss
-from model import RecursiveFER
+from model import RecursiveFERModel
 
 # Kaggle specific imports. These will fail if not in a Kaggle environment.
 try:
@@ -35,7 +35,7 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
     
     # Model setup
     num_classes = len(class_weights)
-    model = RecursiveFER(
+    model = RecursiveFERModel(
         in_channels=3, 
         num_classes=num_classes, 
         hidden_dim=args.hidden_dim, 
@@ -118,8 +118,8 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
             if wandb_enabled and wandb.run:
                 output_dir = wandb.run.dir
             else:
-                os.makedirs("./checkpoints", exist_ok=True)
-                output_dir = "./checkpoints"
+                os.makedirs("/kaggle/working/checkpoint", exist_ok=True)
+                output_dir = "/kaggle/working/checkpoint"
             torch.save(model.state_dict(), os.path.join(output_dir, f"best_model_fold_{fold_num}.pth"))
         
         # Save checkpoint (only last few epochs to save space)
@@ -293,7 +293,7 @@ def train(args):
         # Model, Loss, Optimizer - RAF-DB always has 7 classes
         num_classes = 7
         
-        model = RecursiveFER(in_channels=3, num_classes=num_classes, hidden_dim=args.hidden_dim, max_steps=args.max_steps).to(device)
+        model = RecursiveFERModel(in_channels=3, num_classes=num_classes, hidden_dim=args.hidden_dim, max_steps=args.max_steps).to(device)
         classification_loss = torch.nn.CrossEntropyLoss()
         criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
         optimizer = optim.AdamW(model.parameters(), lr=args.lr)
@@ -348,9 +348,10 @@ def train(args):
             
             print(f"Epoch {epoch+1}: Train Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}, Avg Steps: {val_avg_steps:.2f}")
 
-            # Save checkpoint
-            os.makedirs("./checkpoints", exist_ok=True)
-            torch.save(model.state_dict(), f"./checkpoints/model_epoch_{epoch+1}.pth")
+            # Save checkpoint to kaggle working directory
+        checkpoint_dir = "/kaggle/working/checkpoint"
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_epoch_{epoch+1}.pth"))
             
         wandb.finish()
 
@@ -447,7 +448,7 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
         print(f"\nEvaluating fold {fold_num} model...")
         
         # Load model
-        fold_model = RecursiveFER(
+        fold_model = RecursiveFERModel(
             in_channels=3, 
             num_classes=num_classes, 
             hidden_dim=128, 
@@ -535,7 +536,7 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train a RecursiveFER model.")
+    parser = argparse.ArgumentParser(description="Train a RecursiveFERModel model.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--epochs", type=int, default=10, help="Number of epochs")
@@ -549,6 +550,7 @@ if __name__ == "__main__":
     parser.add_argument("--single_fold", type=int, default=None, help="Train on a single specific fold (0-based)")
     parser.add_argument("--use_weighted_sampler", action="store_true", help="Use weighted sampler for class balancing")
     parser.add_argument("--root_dir", type=str, default="/kaggle/input/rafdb", help="Root directory of the dataset")
+    parser.add_argument("--checkpoint_dir", type=str, default="/kaggle/working/checkpoint", help="Directory to save model checkpoints")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
     parser.add_argument("--run_final_test", action="store_true", help="Run final evaluation on test set after training")
     

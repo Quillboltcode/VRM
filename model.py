@@ -43,7 +43,7 @@ class HaltingUnit(nn.Module):
         out = self.fc(out)
         return self.sigmoid(out)
 
-class RecursiveFER(nn.Module):
+class RecursiveFERModel(nn.Module):
     """
     Recursive Facial Expression Recognition model with Adaptive Computation Time.
     """
