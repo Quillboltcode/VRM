@@ -31,9 +31,18 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
         max_steps=args.max_steps
     ).to(device)
     
-    classification_loss = torch.nn.CrossEntropyLoss(weight=class_weights.to(device))
-    criterion = PonderLoss(classification_loss, lambda_ponder=args.lambda_ponder)
-    optimizer = optim.AdamW(model.parameters(), lr=args.lr)
+    # Note: Model now handles loss computation internally
+    optimizer = optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    
+    # Add OneCycleLR scheduler
+    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+        optimizer,
+        max_lr=5e-4,  # Peak LR
+        steps_per_epoch=len(train_loader),
+        epochs=args.epochs,
+        pct_start=0.1,  # 10% of time spent warming up
+        anneal_strategy='cos'
+    )
     
     if wandb_enabled:
         try:
@@ -57,20 +66,19 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
             images, labels = images.to(device), labels.to(device)
 
             optimizer.zero_grad()
-            logits, num_steps = model(images)
-            loss, class_loss, ponder_cost = criterion(logits, labels, num_steps)
-            loss.backward()
+            total_loss, (task_loss, halt_loss) = model(images, labels)
+            total_loss.backward()
             optimizer.step()
+            scheduler.step()
             
-            total_loss += loss.item()
-            total_class_loss += class_loss.item()
-            total_ponder_cost += ponder_cost.item()
-            total_steps += num_steps.mean().item()
+            total_loss += total_loss.item()
+            total_class_loss += task_loss.item()
+            total_ponder_cost += halt_loss.item()
+            # Note: steps are not available during training with the new model
 
         avg_loss = total_loss / len(train_loader)
         avg_class_loss = total_class_loss / len(train_loader)
         avg_ponder_cost = total_ponder_cost / len(train_loader)
-        avg_steps = total_steps / len(train_loader)
 
         val_acc, val_avg_steps = evaluate(model, val_loader, device)
 
@@ -82,8 +90,7 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 "val_accuracy": val_acc,
                 "val_avg_steps": val_avg_steps,
                 "class_loss": avg_class_loss,
-                "ponder_cost": avg_ponder_cost,
-                "avg_steps": avg_steps
+                "ponder_cost": avg_ponder_cost
             })
 
         print(f"Fold {fold_num+1} Epoch {epoch+1}: Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}")
@@ -119,11 +126,11 @@ def evaluate(model, dataloader, device):
     with torch.no_grad():
         for images, labels in dataloader:
             images, labels = images.to(device), labels.to(device)
-            logits, num_steps = model(images)
+            logits, steps_taken, _ = model(images)  # Returns (logits, steps_taken, halt_probs)
             _, predicted = torch.max(logits.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
-            total_steps += num_steps.mean().item()
+            total_steps += steps_taken.mean().item()
     
     accuracy = 100 * correct / total
     avg_steps = total_steps / len(dataloader)
@@ -195,12 +202,12 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
         with torch.no_grad():
             for images, labels in test_loader:
                 images, labels = images.to(device), labels.to(device)
-                logits, num_steps = fold_model(images)
+                logits, steps_taken, _ = fold_model(images)  # Returns (logits, steps_taken, halt_probs)
                 _, predicted = torch.max(logits.data, 1)
                 
                 fold_predictions.extend(predicted.cpu().numpy())
                 fold_labels.extend(labels.cpu().numpy())
-                total_steps += num_steps.mean().item()
+                total_steps += steps_taken.mean().item()
         
         # Calculate fold accuracy
         fold_correct = sum(1 for pred, true in zip(fold_predictions, fold_labels) if pred == true)

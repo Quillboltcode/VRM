@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, EMOTION_MAPPING
-from model import RecursiveFERModel
+from model import RecursiveFER
 
 # Kaggle specific imports
 try:
@@ -31,7 +31,7 @@ except ImportError:
 
 
 class ModelAnalyzer:
-    """Class for analyzing trained RecursiveFERModel models."""
+    """Class for analyzing trained RecursiveFER models."""
     
     def __init__(self, checkpoint_path: str, device: str = "cuda"):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
@@ -39,7 +39,7 @@ class ModelAnalyzer:
         self.model = None
         self.results_df = None
         
-    def load_model(self, checkpoint_path: str = None) -> RecursiveFERModel:
+    def load_model(self, checkpoint_path: str = None) -> RecursiveFER:
         """Load a trained model checkpoint."""
         if checkpoint_path is None:
             checkpoint_path = self.checkpoint_path
@@ -47,7 +47,7 @@ class ModelAnalyzer:
         print(f"Loading model from {checkpoint_path}")
         
         # Initialize model with default parameters (adjust as needed)
-        self.model = RecursiveFERModel(
+        self.model = RecursiveFER(
             in_channels=3,
             num_classes=7,  # Will be updated based on checkpoint
             hidden_dim=128,
@@ -78,7 +78,7 @@ class ModelAnalyzer:
                 num_classes = 7  # Default fallback
                 print("DEBUG: No test data available, using default 7")
         
-        self.model = RecursiveFERModel(
+        self.model = RecursiveFER(
             in_channels=3,
             num_classes=num_classes,
             hidden_dim=128,
@@ -107,7 +107,7 @@ class ModelAnalyzer:
                 labels = labels.to(self.device)
                 
                 # Get model predictions and step counts
-                logits, num_steps = self.model(images)
+                logits, steps_taken, _ = self.model(images)  # Returns (logits, steps_taken, halt_probs)
                 
                 # Calculate confidence (softmax probability of predicted class)
                 probs = F.softmax(logits, dim=1)
@@ -121,7 +121,7 @@ class ModelAnalyzer:
                         'predicted_class': predicted[i].item(),
                         'ground_truth_class': labels[i].item(),
                         'confidence': confidence[i].item(),
-                        'num_steps': num_steps[i].item(),
+                        'num_steps': steps_taken[i].item(),
                         'predicted_label': EMOTION_MAPPING[predicted[i].item() + 1],
                         'ground_truth_label': EMOTION_MAPPING[labels[i].item() + 1],
                         'is_correct': predicted[i].item() == labels[i].item()
@@ -342,7 +342,7 @@ class ModelAnalyzer:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Analyze RecursiveFERModel model")
+    parser = argparse.ArgumentParser(description="Analyze RecursiveFER model")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--data_root", type=str, default="/kaggle/input/rafdb", help="Root directory for dataset")
     parser.add_argument("--use_imagefolder", action="store_true", help="Use ImageFolder dataset instead of RAF-DB")

@@ -1,139 +1,145 @@
-
 import torch
 import torch.nn as nn
-from torch import Tensor
-from typing import Tuple
+import torch.nn.functional as F
+from einops import rearrange, repeat, reduce
 
 class RecursiveBlock(nn.Module):
     """
-    A recursive block with a residual connection.
+    A simple residual convolutional block that preserves spatial dimensions.
     """
-    def __init__(self, in_channels: int, out_channels: int):
+    def __init__(self, channels: int):
         super().__init__()
-        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1)
-        self.gn1 = nn.GroupNorm(8, out_channels)
-        self.gelu = nn.GELU()
-        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1)
-        self.gn2 = nn.GroupNorm(8, out_channels)
+        self.net = nn.Sequential(
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.GroupNorm(8, channels),
+            nn.GELU(),
+            nn.Conv2d(channels, channels, 3, padding=1),
+            nn.GroupNorm(8, channels)
+        )
+        self.act = nn.GELU()
 
-    def forward(self, x: Tensor) -> Tensor:
+    def forward(self, x):
         residual = x
-        out = self.conv1(x)
-        out = self.gn1(out)
-        out = self.gelu(out)
-        out = self.conv2(out)
-        out = self.gn2(out)
-        out += residual
-        out = self.gelu(out)
-        return out
+        out = self.net(x)
+        return self.act(out + residual)
 
-class HaltingUnit(nn.Module):
-    """
-    Halting unit which decides whether to continue the recursion.
-    """
-    def __init__(self, in_features: int):
-        super().__init__()
-        self.pool = nn.AdaptiveAvgPool2d((1, 1))
-        self.fc = nn.Linear(in_features, 1)
-        self.sigmoid = nn.Sigmoid()
-
-    def forward(self, x: Tensor) -> Tensor:
-        out = self.pool(x)
-        out = out.view(out.size(0), -1)
-        out = self.fc(out)
-        return self.sigmoid(out)
-
-class RecursiveFERModel(nn.Module):
-    """
-    Recursive Facial Expression Recognition model with Adaptive Computation Time.
-    """
-    def __init__(self, in_channels: int, num_classes: int, hidden_dim: int = 64, max_steps: int = 10):
+class RecursiveFER(nn.Module):
+    def __init__(self, in_channels: int, num_classes: int, hidden_dim: int = 64, max_steps: int = 6):
         super().__init__()
         self.max_steps = max_steps
-        self.hidden_dim = hidden_dim
         self.num_classes = num_classes
 
-        # Embedding layer
-        self.embedding = nn.Sequential(
-            nn.Conv2d(in_channels, hidden_dim, kernel_size=3, padding=1),
+        # 1. Input Stem (Project Image -> Hidden Dim)
+        self.stem = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_dim, 3, padding=1),
             nn.GroupNorm(8, hidden_dim),
-            nn.GELU(),
-            nn.Conv2d(hidden_dim, hidden_dim, kernel_size=3, padding=1),
+            nn.GELU()
         )
 
-        # Recursive components
-        self.recursive_block = RecursiveBlock(hidden_dim, hidden_dim)
-        self.gru_cell = nn.GRUCell(hidden_dim, hidden_dim)
-        self.halting_unit = HaltingUnit(hidden_dim)
+        # 2. The Loop Body
+        self.recursive_block = RecursiveBlock(hidden_dim)
 
-        # Classifier
+        # 3. Heads
+        # Classifier: Maps hidden features to Class Logits
         self.classifier = nn.Linear(hidden_dim, num_classes)
-
-        # To store halting probabilities for loss calculation
-        self.halting_probabilities = []
-
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor]:
-        batch_size = x.size(0)
-        h = self.embedding(x)
         
-        # Initial hidden state for GRU
-        h_flat = h.mean(dim=[2, 3])
+        # Halting Head: Maps hidden features to a "Stop" logit
+        self.halt_head = nn.Sequential(
+            nn.AdaptiveAvgPool2d((1, 1)),
+            nn.Flatten(),
+            nn.Linear(hidden_dim, 1) 
+        )
+
+    def forward(self, x, labels=None):
+        """
+        Args:
+            x: Input images [Batch, Channels, Height, Width]
+            labels: Optional ground truth [Batch]
         
-        # Initialize tensors for accumulation
-        total_output = torch.zeros(batch_size, self.classifier.out_features, device=x.device)
-        cumulative_halt_probs = torch.zeros(batch_size, 1, device=x.device)
+        Returns:
+            Training: total_loss, (task_loss, halt_loss)
+            Inference: final_logits, steps_taken, halt_probs
+        """
+        # Embed input: [b, c, h, w] -> [b, hidden, h, w]
+        h = self.stem(x)
         
-        # To store halting probabilities for ponder loss
-        self.halting_probabilities = []
-        
-        # Per-sample step counter
-        step_counters = torch.zeros(batch_size, device=x.device)
-        # Track which samples are still running
-        still_running = torch.ones(batch_size, dtype=torch.bool, device=x.device)
+        logits_list = []
+        halt_logits_list = []
 
-        for step in range(self.max_steps):
-            if not still_running.any():
-                break
-
-            # GRU Memory update for all samples
-            pooled_h = h.mean(dim=[2, 3])
-            h_flat = self.gru_cell(pooled_h, h_flat)
-
-            # Reshape GRU output back to image-like tensor and apply recursive block
-            h = self.recursive_block(h_flat.unsqueeze(2).unsqueeze(3).expand_as(h))
-
-            # Calculate halting probability for all samples
-            halt_p = self.halting_unit(h)
-
-            # For the last step, force halt for remaining samples
-            if step == self.max_steps - 1:
-                halt_p[still_running] = 1.0
+        # --- 1. Recursive Unrolling ---
+        for _ in range(self.max_steps):
+            # Recurse (Preserve spatial dims)
+            h = self.recursive_block(h)
             
-            # Store probabilities for ponder loss
-            self.halting_probabilities.append(halt_p.detach())
-
-            # Calculate the weight for this step's output
-            step_weight = torch.zeros_like(halt_p)
-            if still_running.any():
-                remaining_prob = 1.0 - cumulative_halt_probs[still_running]
-                step_weight[still_running] = torch.min(halt_p[still_running], remaining_prob)
-
-            # Update total output for all samples (but only running ones contribute)
-            running_features = h.mean(dim=[2, 3])
-            classifier_output = self.classifier(running_features)
+            # Pool for prediction: [b, hidden, h, w] -> [b, hidden]
+            pooled = reduce(h, 'b c h w -> b c', 'mean')
             
-            # Add weighted output to total
-            total_output += step_weight * classifier_output
+            # Predict
+            logits_list.append(self.classifier(pooled))
+            halt_logits_list.append(self.halt_head(h))
 
-            # Update which samples are still running
-            newly_halted = (cumulative_halt_probs.squeeze() + halt_p.squeeze()) >= 1.0
-            still_running = still_running & (~newly_halted)
+        # Stack outputs into a time sequence
+        # [b, steps, classes]
+        logits_seq = torch.stack(logits_list, dim=1)
+        # [b, steps] (Remove the singleton last dim from Linear(..., 1))
+        halt_logits_seq = torch.stack(halt_logits_list, dim=1).squeeze(-1)
 
-            # Update cumulative halt probabilities
-            cumulative_halt_probs += halt_p
-            cumulative_halt_probs = torch.clamp(cumulative_halt_probs, 0.0, 1.0)
+        # --- 2. Training Logic (Supervised Halting) ---
+        if labels is not None:
+            # A. Task Loss (CrossEntropy across ALL steps)
+            # Repeat labels to match the sequence length: [b] -> [b*steps]
+            labels_seq = repeat(labels, 'b -> (b s)', s=self.max_steps)
             
-            # Increment step counters for running samples
-            step_counters[still_running] += 1
+            # Flatten logits to match labels: [b, s, c] -> [b*s, c]
+            logits_flat = rearrange(logits_seq, 'b s c -> (b s) c')
             
-        return total_output, step_counters
+            task_loss = F.cross_entropy(logits_flat, labels_seq)
+
+            # B. Halting Loss (Binary Cross Entropy)
+            # Find which steps were actually correct
+            preds_seq = logits_seq.argmax(dim=-1) # [b, s]
+            
+            # Expand labels for comparison: [b] -> [b, s]
+            labels_expanded = repeat(labels, 'b -> b s', s=self.max_steps)
+            
+            # Target is 1.0 if prediction is correct, 0.0 otherwise
+            is_correct = (preds_seq == labels_expanded).float()
+            
+            halt_loss = F.binary_cross_entropy_with_logits(halt_logits_seq, is_correct)
+
+            # Weighted sum (Task is usually harder, so we weight it higher)
+            total_loss = task_loss + (0.5 * halt_loss)
+            return total_loss, (task_loss, halt_loss)
+
+        # --- 3. Inference Logic (Adaptive Stopping) ---
+        else:
+            # Calculate probabilities
+            halt_probs = torch.sigmoid(halt_logits_seq) # [b, s]
+
+            # Determine where to stop (Prob > 0.5)
+            should_stop = (halt_probs > 0.5).long()  # Convert to long for argmax
+            
+            # Force stop at the last step if never stopped
+            force_stop = torch.ones_like(should_stop[:, :1]) # [b, 1]
+            should_stop = torch.cat([should_stop, force_stop], dim=1) # [b, s+1]
+            
+            # Find the FIRST index where stop is True
+            stop_indices = should_stop.argmax(dim=1) 
+            
+            # Clamp to valid range (0 to max_steps-1)
+            stop_indices = stop_indices.clamp(max=self.max_steps - 1)
+
+            # Gather the specific answer from the sequence
+            # We need to select one 'step' per batch from logits_seq [b, s, c]
+            
+            # einops doesn't replace torch.gather well for index selection, 
+            # so we use standard PyTorch gather here.
+            # Reshape indices: [b] -> [b, 1, 1] -> [b, 1, c]
+            gather_indices = stop_indices.view(-1, 1, 1).expand(-1, 1, self.num_classes)
+            
+            final_logits = logits_seq.gather(1, gather_indices).squeeze(1)
+            
+            # Steps taken (1-based count for metrics)
+            steps_taken = stop_indices.float() + 1.0
+
+            return final_logits, steps_taken, halt_probs
