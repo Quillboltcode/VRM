@@ -242,8 +242,8 @@ def extract_subject_id(filename: str) -> str:
         lambda x: x.split('_')[1] if x.startswith(('train_', 'test_')) and len(x.split('_')) >= 2 else None,
         # Number-based patterns: 001_image_01
         lambda x: x.split('_')[0] if x.split('_')[0].isdigit() else None,
-        # Fallback: first 6 chars as subject ID
-        lambda x: x[:6] if len(x) >= 6 else x
+        # Fallback: use full name to avoid false grouping if no pattern matches
+        lambda x: x
     ]
     
     for pattern in patterns:
@@ -461,3 +461,48 @@ def create_balanced_loaders(
         })
     
     return loaders
+
+
+def create_test_loader(
+    root_dir: str,
+    batch_size: int = 32,
+    image_size: int = 224,
+    num_workers: int = 4,
+    use_imagefolder: bool = False,
+    label_file: Optional[str] = None
+):
+    """
+    Create test DataLoader from the test folder for final evaluation.
+    """
+    test_transform = get_default_transform(image_size=image_size, is_train=False)
+    
+    if use_imagefolder:
+        # Check if test folder exists, fallback to train if not
+        test_dir = os.path.join(root_dir, "test")
+        if not os.path.exists(test_dir):
+            print(f"Warning: Test folder not found at {test_dir}. Using train folder for test evaluation.")
+            test_dir = root_dir
+        
+        print(f"Creating test loader from: {test_dir}")
+        test_dataset = ImageFolderDataset(
+            root_dir=test_dir,
+            transform=test_transform,
+            use_full_dataset=True
+        )
+    else:
+        # RAF-DB mode - use test samples from label file
+        if not label_file:
+            raise ValueError("label_file is required for RAF-DB test dataset")
+        
+        print(f"Creating RAF-DB test loader from: {root_dir}")
+        test_dataset = RafDBDataset(root_dir, label_file, transform=test_transform, is_train=False)
+    
+    test_loader = DataLoader(
+        test_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=num_workers,
+        drop_last=False
+    )
+    
+    return test_loader, test_dataset

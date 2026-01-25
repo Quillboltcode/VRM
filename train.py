@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 import wandb
 
-from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, create_balanced_loaders, create_imagefolder_loaders, extract_subject_id
+from dataset import RafDBDataset, get_default_transform, create_balanced_loaders, create_test_loader, extract_subject_id
 from loss import PonderLoss
 from model import RecursiveFER
 
@@ -164,17 +164,13 @@ def train(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Data paths
+    # Data paths - RAF-DB only
     root_dir = args.root_dir
-    if args.use_imagefolder:
-        label_file = None
-        print(f"Using ImageFolder dataset from: {root_dir}")
-    else:
-        label_file = os.path.join(root_dir, "EmoLabel/list_patition_label.txt")
-        print(f"Using RAF-DB dataset from: {root_dir}")
+    label_file = os.path.join(root_dir, "EmoLabel/list_patition_label.txt")
+    print(f"Using RAF-DB dataset from: {root_dir}")
     
     # Check if dataset exists and create dummy if needed
-    if not args.use_imagefolder and label_file and not os.path.exists(label_file):
+    if label_file and not os.path.exists(label_file):
         print(f"Dataset not found at {label_file}. Creating dummy dataset for testing.")
         # Create dummy dataset structure
         os.makedirs(os.path.dirname(label_file), exist_ok=True)
@@ -196,51 +192,28 @@ def train(args):
     # Create balanced loaders with cross-validation
     print("Creating balanced data loaders with cross-validation...")
     try:
-        if args.use_imagefolder:
-            try:
-                cv_loaders = create_imagefolder_loaders(
-                    root_dir=root_dir,
-                    batch_size=args.batch_size,
-                    image_size=args.image_size,
-                    num_workers=args.num_workers,
-                    use_weighted_sampler=args.use_weighted_sampler,
-                    n_splits=args.n_folds,
-                    random_state=args.random_state,
-                    train_split=args.train_split
-                )
-            except ValueError as e:
-                if "Cannot have number of splits" in str(e):
-                    print(f"Warning: {e}")
-                    print(f"Falling back to {min(args.n_folds, len(set([extract_subject_id(f) for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))])))} splits based on available groups...")
-                    # Fall back to fewer splits
-                    available_groups = len(set([extract_subject_id(f) for f in os.listdir(root_dir) if os.path.isdir(os.path.join(root_dir, f))]))
-                    actual_splits = min(args.n_folds, max(1, available_groups))
-                    cv_loaders = create_imagefolder_loaders(
-                        root_dir=root_dir,
-                        batch_size=args.batch_size,
-                        image_size=args.image_size,
-                        num_workers=args.num_workers,
-                        use_weighted_sampler=args.use_weighted_sampler,
-                        n_splits=actual_splits,
-                        random_state=args.random_state,
-                        train_split=args.train_split
-                    )
-                else:
-                    raise e
-        else:
-            if label_file:
-                cv_loaders = create_balanced_loaders(
-                    root_dir=root_dir,
-                    label_file=label_file,
-                    batch_size=args.batch_size,
-                    image_size=args.image_size,
-                    num_workers=args.num_workers,
-                    use_weighted_sampler=args.use_weighted_sampler,
-                    n_splits=args.n_folds,
-                    random_state=args.random_state
-                )
+        # Only RAF-DB supported in this file
+        # Create balanced loaders for RAF-DB
+        cv_loaders = create_balanced_loaders(
+            root_dir=root_dir,
+            label_file=label_file,
+            batch_size=args.batch_size,
+            image_size=args.image_size,
+            num_workers=args.num_workers,
+            use_weighted_sampler=args.use_weighted_sampler,
+            n_splits=args.n_folds,
+            random_state=args.random_state
+        )
+        
+        # Debug: Print number of classes detected for RAF-DB
+        if cv_loaders:
+            first_loader = cv_loaders[0]['train_loader']
+            if hasattr(first_loader.dataset, 'image_files'):
+                unique_labels = first_loader.dataset.image_files['label'].unique()
+                num_classes = len(unique_labels)
+                print(f"DEBUG: RAF-DB has {num_classes} classes: {sorted(unique_labels)}")
             else:
-                raise ValueError("label_file is required for RAF-DB dataset")
+                print(f"DEBUG: Could not determine RAF-DB classes")
         
         if args.single_fold is not None:
             # Train on single specific fold
@@ -263,7 +236,26 @@ def train(args):
             best_acc = train_single_fold(fold_data, args, device, wandb_enabled)
             print(f"\nFinal validation accuracy for fold {args.single_fold}: {best_acc:.4f}")
             
-        elif args.use_cross_validation:
+            # Final test evaluation for single fold
+            if args.run_final_test:
+                run_final_test_evaluation(args, device, [fold_data])
+            
+    except Exception as e:
+        print(f"Error creating balanced loaders: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Cleanup memory to avoid OOM in fallback
+        if 'cv_loaders' in locals():
+            del cv_loaders
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            
+        print("Falling back to simple training setup...")
+        
+        # RAF-DB training
+        if args.use_cross_validation:
             print(f"Training with {args.n_folds}-fold cross-validation...")
             fold_accuracies = []
             
@@ -280,51 +272,26 @@ def train(args):
             print(f"Mean Accuracy: {np.mean(fold_accuracies):.4f} ± {np.std(fold_accuracies):.4f}")
             print(f"{'='*50}")
             
-        else:
-            # Train on single split (first fold only)
-            print("Training on single split...")
-            fold_data = cv_loaders[0]
-            best_acc = train_single_fold(fold_data, args, device, wandb_enabled)
-            print(f"\nFinal validation accuracy: {best_acc:.4f}")
-            
-    except Exception as e:
-        print(f"Error creating balanced loaders: {e}")
-        import traceback
-        traceback.print_exc()
+            # Final test evaluation after cross-validation
+            if args.run_final_test:
+                run_final_test_evaluation(args, device, cv_loaders)
         
-        # Cleanup memory to avoid OOM in fallback
-        if 'cv_loaders' in locals():
-            del cv_loaders
-        gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        # Fallback to simple training
+        elif args.single_fold is None:
+            print("Falling back to simple training setup...")
             
-        print("Falling back to simple training setup...")
-        
-        # Fallback to original simple training
-        train_transform = get_default_transform(image_size=args.image_size, is_train=True)
-        test_transform = get_default_transform(image_size=args.image_size, is_train=False)
+            train_transform = get_default_transform(image_size=args.image_size, is_train=True)
+            test_transform = get_default_transform(image_size=args.image_size, is_train=False)
 
-        if args.use_imagefolder:
-            train_dataset = ImageFolderDataset(root_dir=root_dir, transform=train_transform, is_train=True, train_split=args.train_split)
-            test_dataset = ImageFolderDataset(root_dir=root_dir, transform=test_transform, is_train=False, train_split=args.train_split)
-        else:
-            if label_file:
-                train_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=train_transform, is_train=True)
-                test_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=test_transform, is_train=False)
-            else:
-                raise ValueError("label_file is required for RAF-DB dataset")
+        # Only RAF-DB supported in this file
+        train_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=train_transform, is_train=True)
+        test_dataset = RafDBDataset(root_dir=root_dir, label_file=label_file, transform=test_transform, is_train=False)
 
         train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
         test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
         
-        # Model, Loss, Optimizer - detect number of classes from dataset
-        if hasattr(train_dataset, 'class_to_idx'):
-            num_classes = len(train_dataset.class_to_idx)
-        elif hasattr(train_dataset, 'image_files'):
-            num_classes = len(train_dataset.image_files['label'].unique())
-        else:
-            num_classes = 7
+        # Model, Loss, Optimizer - RAF-DB always has 7 classes
+        num_classes = 7
         
         model = RecursiveFER(in_channels=3, num_classes=num_classes, hidden_dim=args.hidden_dim, max_steps=args.max_steps).to(device)
         classification_loss = torch.nn.CrossEntropyLoss()
@@ -405,6 +372,168 @@ def evaluate(model, dataloader, device):
     avg_steps = total_steps / len(dataloader)
     return accuracy, avg_steps
 
+
+def run_final_test_evaluation(args, device, cv_loaders=None):
+    """
+    Run final test evaluation after training.
+    """
+    try:
+        print(f"\nCreating test loader for final evaluation...")
+        
+        # Create test loader - RAF-DB always
+        label_file = os.path.join(args.root_dir, "EmoLabel/list_patition_label.txt")
+        test_loader, test_dataset = create_test_loader(
+            root_dir=args.root_dir,
+            batch_size=args.batch_size,
+            image_size=args.image_size,
+            num_workers=args.num_workers,
+            use_imagefolder=False,
+            label_file=label_file
+        )
+        
+        print(f"Test dataset size: {len(test_dataset)} samples")
+        
+        # Find all saved models
+        model_paths = []
+        
+        # Find models in checkpoints directory
+        import glob
+        model_paths = glob.glob("./checkpoints/best_model_fold_*.pth")
+        
+        if not model_paths:
+            print("Warning: No saved models found for final evaluation.")
+            return
+        
+        print(f"Found {len(model_paths)} saved models for evaluation")
+        
+        # Run final evaluation
+        final_test_evaluation(model_paths, test_loader, device, test_dataset)
+        
+    except Exception as e:
+        print(f"Error during final test evaluation: {e}")
+        import traceback
+        traceback.print_exc()
+
+
+def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
+    """
+    Perform final evaluation on test set using best models from each fold.
+    """
+    from collections import defaultdict
+    
+    print(f"\n{'='*60}")
+    print("FINAL TEST SET EVALUATION")
+    print(f"{'='*60}")
+    
+    # Determine number of classes from test dataset
+    if hasattr(test_dataset, 'full_dataset'):
+        num_classes = len(test_dataset.full_dataset.classes)
+    elif hasattr(test_dataset, 'image_files'):
+        num_classes = len(np.unique(test_dataset.image_files['label']))
+    else:
+        num_classes = 7
+    
+    all_predictions = defaultdict(list)
+    all_labels = []
+    fold_results = {}
+    
+    # Evaluate each fold's best model
+    for fold_path in model_paths:
+        if not os.path.exists(fold_path):
+            print(f"Warning: Model file not found: {fold_path}")
+            continue
+            
+        fold_num = fold_path.split('_')[-1].split('.')[0]
+        print(f"\nEvaluating fold {fold_num} model...")
+        
+        # Load model
+        fold_model = RecursiveFER(
+            in_channels=3, 
+            num_classes=num_classes, 
+            hidden_dim=128, 
+            max_steps=10
+        ).to(device)
+        
+        try:
+            fold_model.load_state_dict(torch.load(fold_path, map_location=device))
+        except Exception as e:
+            print(f"Error loading model {fold_path}: {e}")
+            del fold_model
+            continue
+        
+        fold_model.eval()
+        
+        # Collect predictions for this fold
+        fold_predictions = []
+        fold_labels = []
+        total_steps = 0
+        
+        with torch.no_grad():
+            for images, labels in test_loader:
+                images, labels = images.to(device), labels.to(device)
+                logits, num_steps = fold_model(images)
+                _, predicted = torch.max(logits.data, 1)
+                
+                fold_predictions.extend(predicted.cpu().numpy())
+                fold_labels.extend(labels.cpu().numpy())
+                total_steps += num_steps.mean().item()
+        
+        # Calculate fold accuracy
+        fold_correct = sum(1 for pred, true in zip(fold_predictions, fold_labels) if pred == true)
+        fold_accuracy = 100 * fold_correct / len(fold_labels)
+        fold_avg_steps = total_steps / len(test_loader)
+        
+        fold_results[fold_num] = {
+            'accuracy': fold_accuracy,
+            'predictions': fold_predictions,
+            'avg_steps': fold_avg_steps
+        }
+        
+        print(f"Fold {fold_num} Test Accuracy: {fold_accuracy:.4f}")
+        print(f"Fold {fold_num} Avg Steps: {fold_avg_steps:.2f}")
+        
+        # Store predictions for ensemble
+        all_predictions[fold_num] = fold_predictions
+        
+        # Store labels (only once)
+        if not all_labels:
+            all_labels = fold_labels
+        
+        # Clean up model to free memory
+        del fold_model
+        torch.cuda.empty_cache() if torch.cuda.is_available() else None
+    
+    if not all_predictions:
+        print("No valid models found for evaluation.")
+        return
+    
+    # Calculate individual fold statistics
+    fold_accuracies = [result['accuracy'] for result in fold_results.values()]
+    print(f"\nIndividual Fold Results:")
+    for fold_num, result in fold_results.items():
+        print(f"  Fold {fold_num}: {result['accuracy']:.4f}")
+    print(f"Mean Fold Accuracy: {np.mean(fold_accuracies):.4f} ± {np.std(fold_accuracies):.4f}")
+    
+    # Ensemble prediction (majority vote)
+    if len(all_predictions) > 1:
+        print(f"\nEnsemble Evaluation:")
+        ensemble_predictions = []
+        for i in range(len(all_labels)):
+            # Get predictions from all folds for this sample
+            sample_predictions = [preds[i] for preds in all_predictions.values()]
+            # Majority vote
+            ensemble_pred = max(set(sample_predictions), key=sample_predictions.count)
+            ensemble_predictions.append(ensemble_pred)
+        
+        ensemble_correct = sum(1 for pred, true in zip(ensemble_predictions, all_labels) if pred == true)
+        ensemble_accuracy = 100 * ensemble_correct / len(all_labels)
+        print(f"Ensemble Test Accuracy: {ensemble_accuracy:.4f}")
+    
+    print(f"{'='*60}")
+    
+    return fold_results
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a RecursiveFER model.")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
@@ -419,10 +548,9 @@ if __name__ == "__main__":
     parser.add_argument("--n_folds", type=int, default=5, help="Number of folds for cross-validation")
     parser.add_argument("--single_fold", type=int, default=None, help="Train on a single specific fold (0-based)")
     parser.add_argument("--use_weighted_sampler", action="store_true", help="Use weighted sampler for class balancing")
-    parser.add_argument("--use_imagefolder", action="store_true", help="Use ImageFolder dataset format instead of RAF-DB")
-    parser.add_argument("--train_split", type=float, default=0.8, help="Train/validation split ratio for ImageFolder")
     parser.add_argument("--root_dir", type=str, default="/kaggle/input/rafdb", help="Root directory of the dataset")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
+    parser.add_argument("--run_final_test", action="store_true", help="Run final evaluation on test set after training")
     
     args = parser.parse_args()
     

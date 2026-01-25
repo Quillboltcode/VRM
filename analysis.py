@@ -20,7 +20,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from dataset import RafDBDataset, get_default_transform, EMOTION_MAPPING
+from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, EMOTION_MAPPING
 from model import RecursiveFER
 
 # Kaggle specific imports
@@ -49,16 +49,46 @@ class ModelAnalyzer:
         # Initialize model with default parameters (adjust as needed)
         self.model = RecursiveFER(
             in_channels=3,
-            num_classes=7,
+            num_classes=7,  # Will be updated based on checkpoint
             hidden_dim=128,
             max_steps=10
         )
         
         # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
+        
+        # Determine number of classes from checkpoint (for compatibility with different datasets)
+        if 'num_classes' in checkpoint:
+            num_classes = checkpoint['num_classes']
+            print(f"DEBUG: Checkpoint has {num_classes} classes saved")
+        else:
+            # Try to determine from test dataset first, then fallback to 7
+            if hasattr(self, 'results_df') and self.results_df is not None and len(self.results_df) > 0:
+                # Check if we have test data with class information
+                if 'predicted_class' in self.results_df.columns:
+                    num_classes = self.results_df['predicted_class'].max() + 1
+                    print(f"DEBUG: Determined {num_classes} classes from test predictions")
+                elif hasattr(self.results_df, 'ground_truth_class'):
+                    num_classes = self.results_df['ground_truth_class'].max() + 1
+                    print(f"DEBUG: Determined {num_classes} classes from test ground truth")
+                else:
+                    num_classes = 7
+                    print("DEBUG: Could not determine classes from test data, using default 7")
+            else:
+                num_classes = 7  # Default fallback
+                print("DEBUG: No test data available, using default 7")
+        
+        self.model = RecursiveFER(
+            in_channels=3,
+            num_classes=num_classes,
+            hidden_dim=128,
+            max_steps=10
+        )
         self.model.load_state_dict(checkpoint)
         self.model.to(self.device)
         self.model.eval()
+        
+        print(f"DEBUG: Model initialized with {num_classes} output classes")
         
         print("Model loaded successfully!")
         return self.model
@@ -315,6 +345,7 @@ def main():
     parser = argparse.ArgumentParser(description="Analyze RecursiveFER model")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint")
     parser.add_argument("--data_root", type=str, default="/kaggle/input/rafdb", help="Root directory for dataset")
+    parser.add_argument("--use_imagefolder", action="store_true", help="Use ImageFolder dataset instead of RAF-DB")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--output_dir", type=str, default="./analysis_output", help="Output directory for plots")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
@@ -324,10 +355,38 @@ def main():
     # Create output directory
     os.makedirs(args.output_dir, exist_ok=True)
     
-    # Load test dataset
+    # Load test dataset - support both RAF-DB and ImageFolder
     test_transform = get_default_transform(image_size=224, is_train=False)
-    label_file = os.path.join(args.data_root, "EmoLabel/list_patition_label.txt")
-    test_dataset = RafDBDataset(args.data_root, label_file, transform=test_transform, is_train=False)
+    
+    if args.use_imagefolder:
+        # ImageFolder dataset - need to point to test folder
+        test_root_dir = args.data_root
+        # Check if there's a test subdirectory
+        if os.path.isdir(os.path.join(args.data_root, "test")):
+            test_root_dir = os.path.join(args.data_root, "test")
+        
+        test_dataset = ImageFolderDataset(root_dir=test_root_dir, transform=test_transform, use_full_dataset=True)
+        print(f"Using ImageFolder test dataset from: {test_root_dir}")
+        # Debug: Print number of classes detected
+        if hasattr(test_dataset, 'full_dataset'):
+            num_classes = len(test_dataset.full_dataset.classes)
+            class_names = test_dataset.full_dataset.classes
+            print(f"DEBUG: ImageFolder test dataset has {num_classes} classes: {class_names}")
+        else:
+            print(f"DEBUG: Could not determine ImageFolder test dataset classes")
+    else:
+        # RAF-DB dataset
+        label_file = os.path.join(args.data_root, "EmoLabel/list_patition_label.txt")
+        test_dataset = RafDBDataset(args.data_root, label_file, transform=test_transform, is_train=False)
+        print(f"Using RAF-DB test dataset from: {args.data_root}")
+        # Debug: Print number of classes detected
+        if hasattr(test_dataset, 'image_files'):
+            unique_labels = test_dataset.image_files['label'].unique()
+            num_classes = len(unique_labels)
+            print(f"DEBUG: RAF-DB test dataset has {num_classes} classes: {sorted(unique_labels)}")
+        else:
+            print(f"DEBUG: Could not determine RAF-DB test dataset classes")
+    
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
     # Initialize analyzer
