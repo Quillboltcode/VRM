@@ -11,6 +11,24 @@ from dataset import ImageFolderDataset, get_default_transform, create_imagefolde
 from model import RecursiveFER
 
 
+
+def get_step_weights(epoch, max_epochs, num_steps, device):
+    # Calculate a 'progress' factor from 0.0 to 1.0
+    progress = epoch / max_epochs
+    
+    # We want later steps to grow in importance.
+    # At progress=0, weights are flat [1, 1, 1, 1]
+    # At progress=1, weights are slanted [0.2, 0.5, 1.2, 2.0]
+    
+    # Create a linear ramp from 0 to 1
+    step_indices = torch.linspace(0, 1, num_steps).to(device)
+    
+    # Slant the weights based on training progress
+    weights = 1.0 + (progress * (step_indices - 0.5) * 2.0)
+    
+    # Ensure weights stay positive
+    return torch.clamp(weights, min=0.1)
+
 def train_single_fold(fold_data, args, device, wandb_enabled=True):
     """Simplified train model on a single fold."""
     fold_num = fold_data['fold']
@@ -27,7 +45,8 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
         in_channels=3, 
         num_classes=num_classes, 
         hidden_dim=args.hidden_dim, 
-        max_steps=args.max_steps
+        max_steps=args.max_steps,
+        use_gradient_checkpointing=args.use_gradient_checkpointing
     ).to(device)
     
     # Note: Model now handles loss computation internally
@@ -42,6 +61,15 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
         pct_start=0.1,  # 10% of time spent warming up
         anneal_strategy='cos'
     )
+    
+    # Setup mixed precision training
+    scaler = None
+    if args.use_mixed_precision:
+        if device.type == "cuda":
+            scaler = torch.cuda.amp.GradScaler()
+        else:
+            # CPU mixed precision is not commonly used, but we can still use AMP for consistency
+            scaler = torch.cuda.amp.GradScaler()
     
     if wandb_enabled:
         try:
@@ -61,25 +89,61 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
         model.train()
         total_loss, total_class_loss, total_ponder_cost, total_steps = 0, 0, 0, 0
         
-        for images, labels in tqdm(train_loader, desc=f"Fold {fold_num+1} Epoch {epoch+1}/{args.epochs}"):
+        # Get step weights for this epoch
+        step_weights = get_step_weights(epoch, args.epochs, args.max_steps, device)
+        # Gradient accumulation setup
+        accumulation_steps = args.gradient_accumulation_steps
+        optimizer.zero_grad()
+        
+        for batch_idx, (images, labels) in enumerate(tqdm(train_loader, desc=f"Fold {fold_num+1} Epoch {epoch+1}/{args.epochs}")):
             images, labels = images.to(device), labels.to(device)
-
-            optimizer.zero_grad()
-            total_loss, (task_loss, halt_loss) = model(images, labels)
-            total_loss.backward()
-            optimizer.step()
-            scheduler.step()
             
-            total_loss += total_loss.item()
-            total_class_loss += task_loss.item()
-            total_ponder_cost += halt_loss.item()
+            # Use mixed precision if enabled
+            if args.use_mixed_precision and device.type == "cuda":
+                with torch.cuda.amp.autocast():
+                    batch_loss, (task_loss, halt_loss) = model(images, labels, step_weights)
+                    
+                    # Scale loss for gradient accumulation
+                    batch_loss = batch_loss / accumulation_steps
+                    task_loss = task_loss / accumulation_steps
+                    halt_loss = halt_loss / accumulation_steps
+                
+                scaler.scale(batch_loss).backward()
+                
+                # Step optimizer and scaler after accumulation steps
+                if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+                    scaler.step(optimizer)
+                    scaler.update()
+                    optimizer.zero_grad()
+                    scheduler.step()
+            else:
+                # No mixed precision or CPU
+                batch_loss, (task_loss, halt_loss) = model(images, labels)
+                
+                # Scale loss for gradient accumulation
+                batch_loss = batch_loss / accumulation_steps
+                task_loss = task_loss / accumulation_steps
+                halt_loss = halt_loss / accumulation_steps
+                
+                batch_loss.backward()
+                
+                # Step optimizer after accumulation steps
+                if (batch_idx + 1) % accumulation_steps == 0 or (batch_idx + 1) == len(train_loader):
+                    optimizer.step()
+                    optimizer.zero_grad()
+                    scheduler.step()
+            
+            # Accumulate losses (multiply back by accumulation_steps for correct averaging)
+            total_loss += batch_loss.item() * accumulation_steps
+            total_class_loss += task_loss.item() * accumulation_steps
+            total_ponder_cost += halt_loss.item() * accumulation_steps
             # Note: steps are not available during training with the new model
 
         avg_loss = total_loss / len(train_loader)
         avg_class_loss = total_class_loss / len(train_loader)
         avg_ponder_cost = total_ponder_cost / len(train_loader)
 
-        val_acc, val_avg_steps = evaluate(model, val_loader, device)
+        val_acc, val_avg_steps = evaluate(model, val_loader, device, args.use_mixed_precision)
 
         if wandb_enabled:
             wandb.log({
@@ -116,16 +180,24 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
     return best_val_acc
 
 
-def evaluate(model, dataloader, device):
+def evaluate(model, dataloader, device, use_mixed_precision=False):
     """Simple evaluation function."""
     model.eval()
     correct = 0
     total = 0
     total_steps = 0
+    
     with torch.no_grad():
         for images, labels in dataloader:
             images, labels = images.to(device), labels.to(device)
-            logits, steps_taken, _ = model(images)  # Returns (logits, steps_taken, halt_probs)
+            
+            # Use mixed precision if enabled
+            if use_mixed_precision and device.type == "cuda":
+                with torch.cuda.amp.autocast():
+                    logits, steps_taken, _ = model(images)  # Returns (logits, steps_taken, halt_probs)
+            else:
+                logits, steps_taken, _ = model(images)  # Returns (logits, steps_taken, halt_probs)
+            
             _, predicted = torch.max(logits.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
@@ -518,6 +590,11 @@ if __name__ == "__main__":
     parser.add_argument("--checkpoint_dir", type=str, default="/kaggle/working/checkpoint", help="Directory to save model checkpoints")
     parser.add_argument("--random_state", type=int, default=42, help="Random state for reproducibility")
     parser.add_argument("--run_final_test", action="store_true", help="Run final evaluation on test set after training")
+    
+    # New optimization arguments
+    parser.add_argument("--use_mixed_precision", action="store_true", help="Use mixed precision training (AMP)")
+    parser.add_argument("--use_gradient_checkpointing", action="store_true", help="Use gradient checkpointing to save memory")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step")
     
     args = parser.parse_args()
     

@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from einops import rearrange, repeat, reduce
+from torch.utils.checkpoint import checkpoint
 
 class RecursiveBlock(nn.Module):
     """
@@ -24,10 +25,11 @@ class RecursiveBlock(nn.Module):
         return self.act(out + residual)
 
 class RecursiveFER(nn.Module):
-    def __init__(self, in_channels: int, num_classes: int, hidden_dim: int = 64, max_steps: int = 6):
+    def __init__(self, in_channels: int, num_classes: int, hidden_dim: int = 64, max_steps: int = 6, use_gradient_checkpointing: bool = False):
         super().__init__()
         self.max_steps = max_steps
         self.num_classes = num_classes
+        self.use_gradient_checkpointing = use_gradient_checkpointing
 
         # 1. Input Stem (Project Image -> Hidden Dim)
         self.stem = nn.Sequential(
@@ -50,7 +52,7 @@ class RecursiveFER(nn.Module):
             nn.Linear(hidden_dim, 1) 
         )
 
-    def forward(self, x, labels=None):
+    def forward(self, x, labels=None, step_weights=None):
         """
         Args:
             x: Input images [Batch, Channels, Height, Width]
@@ -67,9 +69,18 @@ class RecursiveFER(nn.Module):
         halt_logits_list = []
 
         # --- 1. Recursive Unrolling ---
-        for _ in range(self.max_steps):
-            # Recurse (Preserve spatial dims)
-            h = self.recursive_block(h)
+        for step in range(self.max_steps):
+            # Use gradient checkpointing for the recursive block if enabled
+            if self.use_gradient_checkpointing and self.training:
+                def create_recursive_forward(block):
+                    def recursive_forward(x):
+                        return block(x)
+                    return recursive_forward
+                
+                h = checkpoint(create_recursive_forward(self.recursive_block), h, use_reentrant=False)
+            else:
+                # Recurse (Preserve spatial dims)
+                h = self.recursive_block(h)
             
             # Pool for prediction: [b, hidden, h, w] -> [b, hidden]
             pooled = reduce(h, 'b c h w -> b c', 'mean')
@@ -89,15 +100,26 @@ class RecursiveFER(nn.Module):
             # A. Task Loss (CrossEntropy across ALL steps)
             # Repeat labels to match the sequence length: [b] -> [b*steps]
             labels_seq = repeat(labels, 'b -> (b s)', s=self.max_steps)
-            
-            # Flatten logits to match labels: [b, s, c] -> [b*s, c]
-            logits_flat = rearrange(logits_seq, 'b s c -> (b s) c')
-            
-            task_loss = F.cross_entropy(logits_flat, labels_seq)
-
             # B. Halting Loss (Binary Cross Entropy)
             # Find which steps were actually correct
             preds_seq = logits_seq.argmax(dim=-1) # [b, s]
+            # Flatten logits to match labels: [b, s, c] -> [b*s, c]
+            logits_flat = rearrange(logits_seq, 'b s c -> (b s) c')
+            # --- Calculate individual losses ---
+            # reduction='none' gives us a loss for every single step of every image
+            loss_matrix = F.cross_entropy(logits_flat, labels_seq, reduction='none')
+            # Reshape back to [Batch, Steps]
+            loss_matrix = rearrange(loss_matrix, '(b s) -> b s', s=self.max_steps)
+
+            if step_weights is not None:
+                # Apply weights: broadcast [s] weights across [b, s] matrix
+                # We normalize weights so their sum equals the number of steps 
+                # (keeps the loss scale consistent)
+                step_weights = step_weights * (self.max_steps / step_weights.sum())
+                loss_matrix = loss_matrix * step_weights
+            task_loss = loss_matrix.mean()
+
+
             
             # Expand labels for comparison: [b] -> [b, s]
             labels_expanded = repeat(labels, 'b -> b s', s=self.max_steps)
