@@ -88,6 +88,8 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
     for epoch in range(args.epochs):
         model.train()
         total_loss, total_class_loss, total_ponder_cost, total_steps = 0, 0, 0, 0
+        loss_matrix_accumulator = np.zeros(args.max_steps)  # Track loss per step
+        num_batches = 0
         
         # Get step weights for this epoch
         step_weights = get_step_weights(epoch, args.epochs, args.max_steps, device)
@@ -101,7 +103,14 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
             # Use mixed precision if enabled
             if args.use_mixed_precision and device.type == "cuda":
                 with torch.cuda.amp.autocast():
-                    batch_loss, (task_loss, halt_loss) = model(images, labels, step_weights)
+                    batch_loss, (task_loss, halt_loss, loss_matrix) = model(images, labels, step_weights)
+                    
+                    # Accumulate loss_matrix
+                    if isinstance(loss_matrix, torch.Tensor):
+                        loss_matrix_accumulator += loss_matrix.detach().cpu().numpy()
+                    else:
+                        loss_matrix_accumulator += np.array(loss_matrix)
+                    num_batches += 1
                     
                     # Scale loss for gradient accumulation
                     batch_loss = batch_loss / accumulation_steps
@@ -142,11 +151,17 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
         avg_loss = total_loss / len(train_loader)
         avg_class_loss = total_class_loss / len(train_loader)
         avg_ponder_cost = total_ponder_cost / len(train_loader)
+        
+        # Compute average loss_matrix across batches
+        if num_batches > 0:
+            avg_loss_matrix = loss_matrix_accumulator / num_batches
+        else:
+            avg_loss_matrix = None
 
         val_acc, val_avg_steps = evaluate(model, val_loader, device, args.use_mixed_precision)
 
         if wandb_enabled:
-            wandb.log({
+            log_dict = {
                 "epoch": epoch,
                 "fold": fold_num,
                 "train_loss": avg_loss,
@@ -154,7 +169,16 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 "val_avg_steps": val_avg_steps,
                 "class_loss": avg_class_loss,
                 "ponder_cost": avg_ponder_cost
-            })
+            }
+            
+            # Log loss_matrix as histogram and individual step losses
+            if avg_loss_matrix is not None:
+                log_dict["loss_matrix"] = wandb.Histogram(avg_loss_matrix)
+                # Also log individual step losses
+                for step_idx, step_loss in enumerate(avg_loss_matrix):
+                    log_dict[f"loss_step_{step_idx}"] = step_loss
+            
+            wandb.log(log_dict)
 
         print(f"Fold {fold_num+1} Epoch {epoch+1}: Loss: {avg_loss:.4f}, Val Acc: {val_acc:.4f}")
 

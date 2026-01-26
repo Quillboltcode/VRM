@@ -131,7 +131,9 @@ class RecursiveFER(nn.Module):
 
             # Weighted sum (Task is usually harder, so we weight it higher)
             total_loss = task_loss + (0.5 * halt_loss)
-            return total_loss, (task_loss, halt_loss)
+            
+            # Return total loss, individual losses, and per-step losses
+            return total_loss, (task_loss, halt_loss, loss_matrix)
 
         # --- 3. Inference Logic (Adaptive Stopping) ---
         else:
