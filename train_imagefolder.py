@@ -146,7 +146,14 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                     scheduler.step()
             else:
                 # No mixed precision or CPU
-                batch_loss, (task_loss, halt_loss) = model(images, labels)
+                batch_loss, (task_loss, halt_loss, loss_matrix) = model(images, labels, step_weights)
+                
+                # Accumulate loss_matrix
+                if isinstance(loss_matrix, torch.Tensor):
+                    loss_matrix_accumulator += loss_matrix.detach().cpu().numpy()
+                else:
+                    loss_matrix_accumulator += np.array(loss_matrix)
+                num_batches += 1
                 
                 # Scale loss for gradient accumulation
                 batch_loss = batch_loss / accumulation_steps
