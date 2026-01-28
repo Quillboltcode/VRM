@@ -124,11 +124,11 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 with torch.cuda.amp.autocast():
                     batch_loss, (task_loss, halt_loss, loss_matrix) = model(images, labels, step_weights)
                     
-                    # Accumulate loss_matrix
+                    # Accumulate loss_matrix (average over batch dimension)
                     if isinstance(loss_matrix, torch.Tensor):
-                        loss_matrix_accumulator += loss_matrix.detach().cpu().numpy()
+                        loss_matrix_accumulator += loss_matrix.detach().cpu().numpy().mean(axis=0)
                     else:
-                        loss_matrix_accumulator += np.array(loss_matrix)
+                        loss_matrix_accumulator += np.mean(np.array(loss_matrix), axis=0)
                     num_batches += 1
                     
                     # Scale loss for gradient accumulation
@@ -148,11 +148,11 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
                 # No mixed precision or CPU
                 batch_loss, (task_loss, halt_loss, loss_matrix) = model(images, labels, step_weights)
                 
-                # Accumulate loss_matrix
+                # Accumulate loss_matrix (average over batch dimension)
                 if isinstance(loss_matrix, torch.Tensor):
-                    loss_matrix_accumulator += loss_matrix.detach().cpu().numpy()
+                    loss_matrix_accumulator += loss_matrix.detach().cpu().numpy().mean(axis=0)
                 else:
-                    loss_matrix_accumulator += np.array(loss_matrix)
+                    loss_matrix_accumulator += np.mean(np.array(loss_matrix), axis=0)
                 num_batches += 1
                 
                 # Scale loss for gradient accumulation
