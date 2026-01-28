@@ -82,7 +82,7 @@ Implement `DifferentiablePonderLoss`:
 * `ACT/Steps_Per_Class`: (Optional) Log average steps broken down by emotion.
 
 
-* **Optimization:** Use `torch.optim.AdamW` with Cosine Annealing scheduler.
+* **Optimization:** Use `torch.optim.AdamW` with OneCycler scheduler.
 
 ### **Step 4: Evaluation & Visualization**
 

@@ -8,7 +8,7 @@ from tqdm import tqdm
 import wandb
 
 from dataset import ImageFolderDataset, get_default_transform, create_imagefolder_loaders, create_test_loader, extract_subject_id
-from model import RecursiveFER
+from model import RecursiveFER, ResnetPretrainedModel, RecursiveConvNeXtBlock, RecursiveBlock
 
 
 
@@ -41,12 +41,31 @@ def train_single_fold(fold_data, args, device, wandb_enabled=True):
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
     
     num_classes = len(class_weights)
+    
+    # Configure stem based on arguments
+    if args.stem_model == 'resnet':
+        stem = ResnetPretrainedModel(
+            args.backbone_model,
+            pretrained=args.pretrained,
+            out_indices=args.out_indices
+        )
+    else:
+        stem = None  # Use default convolutional stem
+    
+    # Configure recursive block based on arguments
+    if args.recursive_block_type == 'convnext':
+        recursive_block = lambda dim: RecursiveConvNeXtBlock(dim)
+    else:
+        recursive_block = None  # Use default RecursiveBlock
+    
     model = RecursiveFER(
         in_channels=3, 
         num_classes=num_classes, 
         hidden_dim=args.hidden_dim, 
         max_steps=args.max_steps,
-        use_gradient_checkpointing=args.use_gradient_checkpointing
+        use_gradient_checkpointing=args.use_gradient_checkpointing,
+        stem=stem,
+        recursive_block=recursive_block
     ).to(device)
     
     # Note: Model now handles loss computation internally
@@ -272,12 +291,28 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
             
         print(f"\nEvaluating fold {fold_num} model from: {fold_path}")
         
-        # Load model
+        # Load model with same configuration as training
+        if hasattr(args, 'stem_model') and args.stem_model == 'resnet':
+            stem = ResnetPretrainedModel(
+                getattr(args, 'backbone_model', 'resnet18'),
+                pretrained=getattr(args, 'pretrained', False),
+                out_indices=getattr(args, 'out_indices', (1, 2, 3))
+            )
+        else:
+            stem = None
+            
+        if hasattr(args, 'recursive_block_type') and args.recursive_block_type == 'convnext':
+            recursive_block = lambda dim: RecursiveConvNeXtBlock(dim)
+        else:
+            recursive_block = None
+        
         fold_model = RecursiveFER(
             in_channels=3, 
             num_classes=num_classes, 
-            hidden_dim=128, 
-            max_steps=10
+            hidden_dim=getattr(args, 'hidden_dim', 128), 
+            max_steps=getattr(args, 'max_steps', 10),
+            stem=stem,
+            recursive_block=recursive_block
         ).to(device)
         
         try:
@@ -619,6 +654,13 @@ if __name__ == "__main__":
     parser.add_argument("--use_mixed_precision", action="store_true", help="Use mixed precision training (AMP)")
     parser.add_argument("--use_gradient_checkpointing", action="store_true", help="Use gradient checkpointing to save memory")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of steps to accumulate gradients before optimizer step")
+    
+    # Model architecture arguments
+    parser.add_argument("--stem_model", type=str, default="default", choices=["default", "resnet"], help="Type of stem to use")
+    parser.add_argument("--backbone_model", type=str, default="resnet18", help="Backbone model for ResNet stem")
+    parser.add_argument("--pretrained", action="store_true", help="Use pretrained weights for backbone")
+    parser.add_argument("--out_indices", type=int, nargs='+', default=[1, 2, 3], help="Output indices for ResNet features")
+    parser.add_argument("--recursive_block_type", type=str, default="default", choices=["default", "convnext"], help="Type of recursive block to use")
     
     args = parser.parse_args()
     

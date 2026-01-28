@@ -21,7 +21,7 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from dataset import RafDBDataset, ImageFolderDataset, get_default_transform, EMOTION_MAPPING
-from model import RecursiveFER
+from model import RecursiveFER, ResnetPretrainedModel, RecursiveConvNeXtBlock, RecursiveBlock
 
 # Kaggle specific imports
 try:
@@ -33,11 +33,20 @@ except ImportError:
 class ModelAnalyzer:
     """Class for analyzing trained RecursiveFER models."""
     
-    def __init__(self, checkpoint_path: str, device: str = "cuda"):
+    def __init__(self, checkpoint_path: str, device: str = "cuda", 
+                 stem_model='default', backbone_model='resnet18', pretrained=False,
+                 out_indices=(1, 2, 3), recursive_block_type='default'):
         self.device = torch.device(device if torch.cuda.is_available() else "cpu")
         self.checkpoint_path = checkpoint_path
         self.model = None
         self.results_df = None
+        
+        # Store model configuration
+        self.stem_model = stem_model
+        self.backbone_model = backbone_model
+        self.pretrained = pretrained
+        self.out_indices = out_indices
+        self.recursive_block_type = recursive_block_type
         
     def load_model(self, checkpoint_path: str = None) -> RecursiveFER:
         """Load a trained model checkpoint."""
@@ -46,50 +55,66 @@ class ModelAnalyzer:
             
         print(f"Loading model from {checkpoint_path}")
         
-        # Initialize model with default parameters (adjust as needed)
-        self.model = RecursiveFER(
-            in_channels=3,
-            num_classes=7,  # Will be updated based on checkpoint
-            hidden_dim=128,
-            max_steps=10
-        )
-        
-        # Load checkpoint
+        # Load checkpoint first to get the state dict
         checkpoint = torch.load(checkpoint_path, map_location=self.device)
         
-        # Determine number of classes from checkpoint (for compatibility with different datasets)
-        if 'num_classes' in checkpoint:
+        # Try to determine number of classes from checkpoint or fallback to 7
+        if isinstance(checkpoint, dict) and 'num_classes' in checkpoint:
             num_classes = checkpoint['num_classes']
             print(f"DEBUG: Checkpoint has {num_classes} classes saved")
-        else:
-            # Try to determine from test dataset first, then fallback to 7
-            if hasattr(self, 'results_df') and self.results_df is not None and len(self.results_df) > 0:
-                # Check if we have test data with class information
-                if 'predicted_class' in self.results_df.columns:
-                    num_classes = self.results_df['predicted_class'].max() + 1
-                    print(f"DEBUG: Determined {num_classes} classes from test predictions")
-                elif hasattr(self.results_df, 'ground_truth_class'):
-                    num_classes = self.results_df['ground_truth_class'].max() + 1
-                    print(f"DEBUG: Determined {num_classes} classes from test ground truth")
-                else:
-                    num_classes = 7
-                    print("DEBUG: Could not determine classes from test data, using default 7")
+        elif hasattr(self, 'results_df') and self.results_df is not None and len(self.results_df) > 0:
+            # Check if we have test data with class information
+            if 'predicted_class' in self.results_df.columns:
+                num_classes = self.results_df['predicted_class'].max() + 1
+                print(f"DEBUG: Determined {num_classes} classes from test predictions")
+            elif hasattr(self.results_df, 'ground_truth_class'):
+                num_classes = self.results_df['ground_truth_class'].max() + 1
+                print(f"DEBUG: Determined {num_classes} classes from test ground truth")
             else:
-                num_classes = 7  # Default fallback
-                print("DEBUG: No test data available, using default 7")
+                num_classes = 7
+                print("DEBUG: Could not determine classes from test data, using default 7")
+        else:
+            num_classes = 7  # Default fallback
+            print("DEBUG: No class info available, using default 7")
         
+        # Configure stem based on configuration
+        if self.stem_model == 'resnet':
+            stem = ResnetPretrainedModel(
+                self.backbone_model,
+                pretrained=self.pretrained,
+                out_indices=self.out_indices
+            )
+        else:
+            stem = None  # Use default convolutional stem
+        
+        # Configure recursive block based on configuration
+        if self.recursive_block_type == 'convnext':
+            recursive_block = lambda dim: RecursiveConvNeXtBlock(dim)
+        else:
+            recursive_block = None  # Use default RecursiveBlock
+        
+        # Initialize model with the determined configuration
         self.model = RecursiveFER(
             in_channels=3,
             num_classes=num_classes,
             hidden_dim=128,
-            max_steps=10
+            max_steps=10,
+            stem=stem,
+            recursive_block=recursive_block
         )
-        self.model.load_state_dict(checkpoint)
+        
+        # Load state dict
+        if isinstance(checkpoint, dict):
+            # Full checkpoint with metadata
+            self.model.load_state_dict(checkpoint.get('model_state_dict', checkpoint))
+        else:
+            # Direct state dict
+            self.model.load_state_dict(checkpoint)
+            
         self.model.to(self.device)
         self.model.eval()
         
         print(f"DEBUG: Model initialized with {num_classes} output classes")
-        
         print("Model loaded successfully!")
         return self.model
     
@@ -350,6 +375,13 @@ def main():
     parser.add_argument("--output_dir", type=str, default="./analysis_output", help="Output directory for plots")
     parser.add_argument("--device", type=str, default="cuda", help="Device to use")
     
+    # Model architecture arguments
+    parser.add_argument("--stem_model", type=str, default="default", choices=["default", "resnet"], help="Type of stem to use")
+    parser.add_argument("--backbone_model", type=str, default="resnet18", help="Backbone model for ResNet stem")
+    parser.add_argument("--pretrained", action="store_true", help="Use pretrained weights for backbone")
+    parser.add_argument("--out_indices", type=int, nargs='+', default=[1, 2, 3], help="Output indices for ResNet features")
+    parser.add_argument("--recursive_block_type", type=str, default="default", choices=["default", "convnext"], help="Type of recursive block to use")
+    
     args = parser.parse_args()
     
     # Create output directory
@@ -389,8 +421,16 @@ def main():
     
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
-    # Initialize analyzer
-    analyzer = ModelAnalyzer(args.checkpoint, args.device)
+    # Initialize analyzer with model configuration
+    analyzer = ModelAnalyzer(
+        args.checkpoint, 
+        args.device,
+        stem_model=getattr(args, 'stem_model', 'default'),
+        backbone_model=getattr(args, 'backbone_model', 'resnet18'),
+        pretrained=getattr(args, 'pretrained', False),
+        out_indices=tuple(getattr(args, 'out_indices', (1, 2, 3))),
+        recursive_block_type=getattr(args, 'recursive_block_type', 'default')
+    )
     
     # Run inference and collect data
     results_df = analyzer.run_inference(test_loader)
