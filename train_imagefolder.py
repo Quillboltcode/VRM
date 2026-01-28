@@ -258,7 +258,7 @@ def evaluate(model, dataloader, device, use_mixed_precision=False):
     return accuracy, avg_steps
 
 
-def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
+def final_test_evaluation(model_paths, test_loader, device, args, test_dataset=None):
     """
     Perform final evaluation on test set using best models from each fold.
     Runs comprehensive analysis from analysis.py instead of basic metrics.
@@ -416,7 +416,16 @@ def final_test_evaluation(model_paths, test_loader, device, test_dataset=None):
         
         try:
             # Initialize analyzer with the best model
-            analyzer = ModelAnalyzer(best_fold_path, str(device))
+            # Initialize analyzer with best model and configuration
+            analyzer = ModelAnalyzer(
+                best_fold_path, 
+                str(device),
+                stem_model=getattr(args, 'stem_model', 'default'),
+                backbone_model=getattr(args, 'backbone_model', 'resnet18'),
+                pretrained=getattr(args, 'pretrained', False),
+                out_indices=tuple(getattr(args, 'out_indices', (1, 2, 3))),
+                recursive_block_type=getattr(args, 'recursive_block_type', 'default')
+            )
             
             # Run analysis
             results_df = analyzer.run_inference(test_loader)
@@ -505,7 +514,7 @@ def run_final_test_evaluation(args, device, cv_loaders=None):
         print(f"Found {len(model_paths)} saved models for evaluation")
         
         # Run final evaluation
-        final_test_evaluation(model_paths, test_loader, device, test_dataset)
+        final_test_evaluation(model_paths, test_loader, device, args, test_dataset)
         
     except Exception as e:
         print(f"Error during final test evaluation: {e}")
@@ -601,7 +610,7 @@ def train_imagefolder_cv(args):
             
             # Final test evaluation for single fold
             if args.run_final_test:
-                run_final_test_evaluation(args, device, [fold_data])
+                run_final_test_evaluation(args, device, args, [fold_data])
             
         elif args.use_cross_validation:
             print(f"Training with {args.n_folds}-fold cross-validation...")
@@ -622,7 +631,7 @@ def train_imagefolder_cv(args):
             
             # Final test evaluation after cross-validation
             if args.run_final_test:
-                run_final_test_evaluation(args, device, cv_loaders)
+                run_final_test_evaluation(args, device, args, cv_loaders)
             
         else:
             # Train on single split (first fold only)
