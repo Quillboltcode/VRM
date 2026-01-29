@@ -610,7 +610,7 @@ def train_imagefolder_cv(args):
             
             # Final test evaluation for single fold
             if args.run_final_test:
-                run_final_test_evaluation(args, device, args, [fold_data])
+                run_final_test_evaluation(args, device, [fold_data])
             
         elif args.use_cross_validation:
             print(f"Training with {args.n_folds}-fold cross-validation...")
@@ -631,7 +631,7 @@ def train_imagefolder_cv(args):
             
             # Final test evaluation after cross-validation
             if args.run_final_test:
-                run_final_test_evaluation(args, device, args, cv_loaders)
+                run_final_test_evaluation(args, device, cv_loaders)
             
         else:
             # Train on single split (first fold only)
